@@ -298,9 +298,12 @@ impl ControlService {
 
         let frame = {
             let mut state = self.state.lock().await;
+            let next_frame_seq = state.frame_seq + 1;
+            let motor_config = state.motor_config.clone();
+            state.frame_seq = next_frame_seq;
             build_frame(
-                &mut state.frame_seq,
-                &state.motor_config,
+                next_frame_seq,
+                &motor_config,
                 logical_angles,
                 source.unwrap_or_else(|| "ui".to_string()),
             )?
@@ -404,7 +407,7 @@ impl AppState {
 }
 
 fn build_frame(
-    frame_seq: &mut u64,
+    frame_seq: u64,
     motor_config: &[MotorConfig],
     logical_angles: Vec<f32>,
     source: String,
@@ -413,7 +416,6 @@ fn build_frame(
         bail!("motor_config must contain exactly 32 entries");
     }
 
-    *frame_seq += 1;
     let timestamp_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX_EPOCH")?
@@ -427,7 +429,7 @@ fn build_frame(
         .collect::<Vec<_>>();
 
     Ok(MotorCommandFrame {
-        frame_id: *frame_seq,
+        frame_id: frame_seq,
         timestamp_ns,
         timestamp_rfc3339,
         source,
@@ -456,16 +458,17 @@ fn normalize_motor_config(motors: Vec<MotorConfig>) -> Result<Vec<MotorConfig>> 
 
     let mut slots = vec![None; MOTOR_COUNT];
     for motor in motors {
-        if motor.id >= MOTOR_COUNT {
-            bail!("motor id {} out of range", motor.id);
+        let motor_id = motor.id;
+        if motor_id >= MOTOR_COUNT {
+            bail!("motor id {} out of range", motor_id);
         }
         if motor.min_angle > motor.max_angle {
-            bail!("motor id {} has inverted min/max", motor.id);
+            bail!("motor id {} has inverted min/max", motor_id);
         }
-        if slots[motor.id].is_some() {
-            bail!("duplicate motor id {}", motor.id);
+        if slots[motor_id].is_some() {
+            bail!("duplicate motor id {}", motor_id);
         }
-        slots[motor.id] = Some(motor);
+        slots[motor_id] = Some(motor);
     }
 
     slots

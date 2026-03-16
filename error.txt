@@ -1,0 +1,69 @@
+error: proc macro panicked
+   --> src/main.rs:134:14
+    |
+134 |         .run(tauri::generate_context!())
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: message: failed to open icon /Users/seanja/Developer/BionicFace-Panel/src-tauri/icons/icon.png: No such file or directory (os error 2)
+
+error[E0502]: cannot borrow `state` as immutable because it is also borrowed as mutable
+   --> src/control.rs:303:18
+    |
+301 |             build_frame(
+    |             ----------- mutable borrow later used by call
+302 |                 &mut state.frame_seq,
+    |                      ----- mutable borrow occurs here
+303 |                 &state.motor_config,
+    |                  ^^^^^ immutable borrow occurs here
+
+error[E0599]: no method named `path` found for reference `&AppHandle` in the current scope
+   --> src/main.rs:107:10
+    |
+106 | /     app_handle
+107 | |         .path()
+    | |         -^^^^ method not found in `&AppHandle`
+    | |_________|
+    |
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `Manager` which provides `path` is implemented but not in scope; perhaps you want to import it
+    |
+  1 + use tauri::Manager;
+    |
+
+error[E0599]: no method named `manage` found for mutable reference `&mut tauri::App` in the current scope
+    --> src/main.rs:121:17
+     |
+ 121 |             app.manage(Arc::new(AppState::new(service)));
+     |                 ^^^^^^
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: there is a method `manager` with a similar name, but with different arguments
+    --> /Users/seanja/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-2.10.3/src/lib.rs:1066:5
+     |
+1066 |     fn manager(&self) -> &AppManager<R>;
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: trait `Manager` which provides `manage` is implemented but not in scope; perhaps you want to import it
+     |
+   1 + use tauri::Manager;
+     |
+
+error[E0382]: use of moved value: `motor`
+   --> src/control.rs:468:15
+    |
+458 |     for motor in motors {
+    |         ----- move occurs because `motor` has type `MotorConfig`, which does not implement the `Copy` trait
+...
+468 |         slots[motor.id] = Some(motor);
+    |               ^^^^^^^^         ----- value moved here
+    |               |
+    |               value used here after move
+    |
+help: consider cloning the value if the performance cost is acceptable
+    |
+468 |         slots[motor.id] = Some(motor.clone());
+    |                                     ++++++++
+
+Some errors have detailed explanations: E0382, E0502, E0599.
+For more information about an error, try `rustc --explain E0382`.
+error: could not compile `bionic-face-panel` (bin "bionic-face-panel") due to 5 previous errors

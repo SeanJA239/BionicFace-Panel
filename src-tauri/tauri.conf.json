@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.bionicface.panel",
   "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
   "app": {

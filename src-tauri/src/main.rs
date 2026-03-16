@@ -7,7 +7,7 @@ use control::{
     AppState, BlendshapeFrame, ConnectionStatus, ControlService, MotorAdjustRequest,
     MotorCommandFrame, MotorConfig, MotorFrameAck,
 };
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 async fn connect_pi(

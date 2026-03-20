@@ -1,1 +1,31 @@
+# Rust / Tauri
 target/
+src-tauri/target/
+
+# Node / frontend
+node_modules/
+dist/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local logs / temp
+logs/
+*.log
+error.txt
+
+# Env / local machine config
+.env
+.env.*
+
+# Local backup files
+*.bak

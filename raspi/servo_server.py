@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("servo-server")
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "bionicFace" / "config.py"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "xjtlu_BionicFace_hardware" / "config.py"
 
 
 @dataclass(frozen=True)

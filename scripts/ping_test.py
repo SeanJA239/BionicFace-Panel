@@ -1,17 +1,16 @@
+import json
+import socket
 import time
-import zmq
 
-ctx = zmq.Context()
-sock = ctx.socket(zmq.REQ)
-sock.setsockopt(zmq.RCVTIMEO, 3000)
-sock.setsockopt(zmq.SNDTIMEO, 3000)
-sock.connect("tcp://192.168.137.93:5555")
 
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 payload = {
-    "command": "ping",
-    "client_time_ns": time.time_ns(),
-    "source": "pc_ping_test",
+    "frameId": 1,
+    "timestampNs": time.time_ns(),
+    "timestampRfc3339": "",
+    "source": "udp_ping_test",
+    "angles": [90.0] * 32,
 }
 
-sock.send_json(payload)
-print(sock.recv_json())
+sock.sendto(json.dumps(payload).encode("utf-8"), ("127.0.0.1", 6000))
+print("sent udp frame to 127.0.0.1:6000")

@@ -1,162 +1,122 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  centerAll,
   connectPi,
-  pingPi,
-  sendBlendshapeFrame,
-  setSingleMotor,
-  updateMotorConfig,
+  disconnectPi,
+  flushCurrentFrame,
+  getLastFrame,
+  getMotorChannels,
+  getRuntimeState,
+  getTransportStatus,
+  setMotorTarget,
+  type MotorChannel,
+  type RuntimeState,
+  type UdpControlFrame,
 } from "./tauri";
-import {
-  BLENDSHAPE_MAPPING,
-  BLENDSHAPE_NAMES,
-  DEFAULT_MOTOR_CONFIG,
-  MOTOR_NODES,
-} from "./topology";
 
-const CANVAS_WIDTH = 640;
-const CANVAS_HEIGHT = 720;
-const DRAG_RANGE_PX = 42;
-const LOGICAL_RANGE_DEG = 45;
+const DEFAULT_ENDPOINT = "192.168.1.50:6000";
+const MOTOR_COUNT = 32;
 
-type DragState = {
-  motorId: number;
-  pointerId: number;
-  startY: number;
-  startLogical: number;
-};
-
-const endpointDefault = "tcp://192.168.1.50:5555";
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
+function fallbackRuntime(): RuntimeState {
+  return {
+    endpoint: null,
+    heartbeatHz: 100,
+    disabledMotorIds: [30, 31],
+    targetLogical: Array(MOTOR_COUNT).fill(0),
+    targetApplied: Array(MOTOR_COUNT).fill(0),
+    currentApplied: Array(MOTOR_COUNT).fill(0),
+  };
 }
 
 function App() {
-  const [endpoint, setEndpoint] = useState(endpointDefault);
-  const [connection, setConnection] = useState("Not connected");
-  const [logicalAngles, setLogicalAngles] = useState<number[]>(() => Array(32).fill(0));
-  const [blendshapes, setBlendshapes] = useState<Record<string, number>>(() =>
-    Object.fromEntries(BLENDSHAPE_NAMES.map((name) => [name, 0])),
-  );
-  const [activeMotorId, setActiveMotorId] = useState<number | null>(null);
-  const [status, setStatus] = useState("Idle");
-  const dragRef = useRef<DragState | null>(null);
-  const sendTimerRef = useRef<number | null>(null);
+  const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT);
+  const [channels, setChannels] = useState<MotorChannel[]>([]);
+  const [runtime, setRuntime] = useState<RuntimeState>(fallbackRuntime);
+  const [lastFrame, setLastFrame] = useState<UdpControlFrame | null>(null);
+  const [status, setStatus] = useState("Loading config...");
+  const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    updateMotorConfig(DEFAULT_MOTOR_CONFIG).catch((error) => {
-      setStatus(`Config sync skipped: ${String(error)}`);
-    });
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (sendTimerRef.current !== null) {
-        window.clearTimeout(sendTimerRef.current);
+    async function bootstrap() {
+      try {
+        const [motorChannels, runtimeState, transportStatus] = await Promise.all([
+          getMotorChannels(),
+          getRuntimeState(),
+          getTransportStatus(),
+        ]);
+        setChannels(motorChannels);
+        setRuntime(runtimeState);
+        setConnected(transportStatus.connected);
+        if (transportStatus.endpoint) {
+          setEndpoint(transportStatus.endpoint);
+        }
+        setStatus("Config loaded");
+      } catch (error) {
+        setStatus(String(error));
       }
-    };
+    }
+
+    bootstrap();
   }, []);
 
-  const nodePositions = useMemo(
-    () =>
-      MOTOR_NODES.map((node) => {
-        const logical = logicalAngles[node.id] ?? 0;
-        const dy = -(logical / LOGICAL_RANGE_DEG) * DRAG_RANGE_PX;
-        return {
-          ...node,
-          logical,
-          renderedX: node.x,
-          renderedY: node.y + dy,
-        };
-      }),
-    [logicalAngles],
-  );
+  async function refreshLastFrame() {
+    try {
+      setLastFrame(await getLastFrame());
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
 
   async function handleConnect() {
     try {
       const result = await connectPi(endpoint);
-      setConnection(result.connected ? `Connected: ${result.endpoint}` : "Disconnected");
-      setStatus("Pi endpoint connected");
+      setConnected(result.connected);
+      setStatus(`UDP executor connected: ${result.endpoint}`);
     } catch (error) {
-      setConnection("Connect failed");
       setStatus(String(error));
     }
   }
 
-  async function handlePing() {
+  async function handleDisconnect() {
     try {
-      const result = await pingPi();
-      setStatus(`Ping ok: ${JSON.stringify(result)}`);
+      await disconnectPi();
+      setConnected(false);
+      setStatus("UDP executor disconnected");
     } catch (error) {
       setStatus(String(error));
     }
   }
 
-  function queueMotorSend(motorId: number, logicalAngle: number) {
-    if (sendTimerRef.current !== null) {
-      window.clearTimeout(sendTimerRef.current);
+  async function handleCenterAll() {
+    try {
+      const next = await centerAll();
+      setRuntime(next);
+      setStatus("All motor targets reset to neutral");
+    } catch (error) {
+      setStatus(String(error));
     }
-    sendTimerRef.current = window.setTimeout(async () => {
-      try {
-        const ack = await setSingleMotor(motorId, logicalAngle);
-        setStatus(`Frame ${ack.frame_id} -> motor ${motorId} @ ${logicalAngle.toFixed(1)} deg`);
-      } catch (error) {
-        setStatus(String(error));
-      }
-    }, 16);
   }
 
-  function beginDrag(motorId: number, pointerId: number, clientY: number) {
-    dragRef.current = {
-      motorId,
-      pointerId,
-      startY: clientY,
-      startLogical: logicalAngles[motorId] ?? 0,
-    };
-    setActiveMotorId(motorId);
+  async function handleFlush() {
+    try {
+      const frame = await flushCurrentFrame();
+      setLastFrame(frame);
+      setStatus(frame ? `Frame ${frame.frameId} sent immediately` : "No UDP endpoint configured");
+    } catch (error) {
+      setStatus(String(error));
+    }
   }
 
-  function updateDrag(clientY: number) {
-    const drag = dragRef.current;
-    if (!drag) {
-      return;
-    }
-
-    const deltaY = drag.startY - clientY;
-    const deltaLogical = (deltaY / DRAG_RANGE_PX) * LOGICAL_RANGE_DEG;
-    const nextLogical = clamp(drag.startLogical + deltaLogical, -LOGICAL_RANGE_DEG, LOGICAL_RANGE_DEG);
-
-    setLogicalAngles((current) => {
-      const next = [...current];
-      next[drag.motorId] = Number(nextLogical.toFixed(2));
+  async function handleSliderChange(motorId: number, value: number) {
+    setRuntime((current) => {
+      const next = { ...current, targetLogical: [...current.targetLogical] };
+      next.targetLogical[motorId] = value;
       return next;
     });
-    queueMotorSend(drag.motorId, nextLogical);
-  }
-
-  function endDrag(pointerId: number) {
-    if (dragRef.current?.pointerId === pointerId) {
-      dragRef.current = null;
-      setActiveMotorId(null);
-    }
-  }
-
-  async function handleBlendshapeChange(name: string, value: number) {
-    const nextBlendshapes = { ...blendshapes, [name]: value };
-    setBlendshapes(nextBlendshapes);
-    const coefficients = BLENDSHAPE_NAMES.map((key) => nextBlendshapes[key]);
-    const previewAngles = BLENDSHAPE_MAPPING.map((row) =>
-      row.reduce((sum, weight, index) => sum + weight * coefficients[index], 0),
-    );
-    setLogicalAngles(previewAngles);
 
     try {
-      const ack = await sendBlendshapeFrame(
-        [...BLENDSHAPE_NAMES],
-        coefficients,
-        BLENDSHAPE_MAPPING,
-      );
-      setStatus(`Blendshape frame ${ack.frame_id} dispatched`);
+      const next = await setMotorTarget(motorId, value);
+      setRuntime(next);
     } catch (error) {
       setStatus(String(error));
     }
@@ -166,138 +126,117 @@ function App() {
     <main className="app-shell">
       <section className="hero-card">
         <div>
-          <p className="eyebrow">BionicFace Panel</p>
-          <h1>2D motor topology and live facial drive testbed</h1>
+          <p className="eyebrow">BionicFace Calibration Console</p>
+          <h1>32-channel direct motor control panel</h1>
           <p className="lede">
-            Drag any anchor point for logical-angle micro tuning. Blendshape sliders are routed
-            through the Rust matrix layer and logged with nanosecond timestamps before dispatch.
+            React slider values are sent through Tauri invoke. Rust performs offset compensation,
+            logical clamp, 100Hz interpolation, and UDP JSON dispatch to the Raspberry Pi dumb
+            executor.
           </p>
         </div>
         <div className="hero-actions">
           <label className="endpoint-field">
-            <span>Pi Endpoint</span>
+            <span>UDP Endpoint</span>
             <input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} />
           </label>
           <div className="button-row">
             <button onClick={handleConnect}>Connect</button>
-            <button className="secondary" onClick={handlePing}>
-              Ping
+            <button className="secondary" onClick={handleDisconnect}>
+              Disconnect
+            </button>
+            <button className="secondary" onClick={handleCenterAll}>
+              Center All
+            </button>
+            <button className="secondary" onClick={handleFlush}>
+              Flush
             </button>
           </div>
-          <p className="status-line">{connection}</p>
+          <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
           <p className="status-line muted">{status}</p>
         </div>
       </section>
 
-      <section className="workspace-grid">
-        <article className="panel topology-panel">
+      <section className="workspace-grid single">
+        <article className="panel">
           <div className="panel-header">
             <div>
-              <p className="panel-kicker">Topology</p>
-              <h2>32-motor facial anchor map</h2>
+              <p className="panel-kicker">Sliders</p>
+              <h2>Logical target input</h2>
             </div>
-            <p className="panel-note">Vertical drag range ±45 logical degrees</p>
+            <p className="panel-note">
+              Disabled channels remain in protocol but hold their neutral values.
+            </p>
           </div>
 
-          <svg
-            className="topology-canvas"
-            viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`}
-            onPointerMove={(event) => updateDrag(event.clientY)}
-            onPointerUp={(event) => endDrag(event.pointerId)}
-            onPointerLeave={(event) => endDrag(event.pointerId)}
-          >
-            <defs>
-              <linearGradient id="faceGradient" x1="0%" x2="100%" y1="0%" y2="100%">
-                <stop offset="0%" stopColor="#1a2940" />
-                <stop offset="100%" stopColor="#09111d" />
-              </linearGradient>
-              <radialGradient id="signalGlow" cx="50%" cy="30%" r="70%">
-                <stop offset="0%" stopColor="rgba(56,189,248,0.45)" />
-                <stop offset="100%" stopColor="rgba(56,189,248,0)" />
-              </radialGradient>
-            </defs>
+          <div className="slider-stack calibration-grid">
+            {channels.map((channel) => {
+              const logicalValue = runtime.targetLogical[channel.id] ?? channel.neutralLogical;
+              const appliedValue = runtime.currentApplied[channel.id] ?? channel.neutralApplied;
 
-            <rect x="0" y="0" width={CANVAS_WIDTH} height={CANVAS_HEIGHT} rx="28" fill="url(#faceGradient)" />
-            <ellipse cx="320" cy="320" rx="210" ry="255" fill="url(#signalGlow)" />
-            <path
-              d="M220 205 C255 180 285 180 320 205 C355 180 385 180 420 205"
-              className="face-line"
-            />
-            <path d="M280 275 C300 265 340 265 360 275" className="face-line" />
-            <path d="M250 360 C290 340 350 340 390 360" className="face-line" />
-            <path d="M265 430 C300 455 340 455 375 430" className="face-line" />
-            <path d="M320 290 L320 510" className="face-axis" />
-
-            {MOTOR_NODES.map((node) => (
-              <line
-                key={`guide-${node.id}`}
-                x1={node.x}
-                y1={node.y - DRAG_RANGE_PX}
-                x2={node.x}
-                y2={node.y + DRAG_RANGE_PX}
-                className="guide-line"
-              />
-            ))}
-
-            {nodePositions.map((node) => (
-              <g key={node.id}>
-                <line x1={320} y1={320} x2={node.renderedX} y2={node.renderedY} className="tendon-line" />
-                <circle
-                  cx={node.renderedX}
-                  cy={node.renderedY}
-                  r={activeMotorId === node.id ? 17 : 13}
-                  fill={node.color}
-                  className="motor-node"
-                  onPointerDown={(event) => {
-                    beginDrag(node.id, event.pointerId, event.clientY);
-                    event.currentTarget.setPointerCapture(event.pointerId);
-                  }}
-                />
-                <text x={node.renderedX} y={node.renderedY - 22} textAnchor="middle" className="node-label">
-                  {node.id}
-                </text>
-              </g>
-            ))}
-          </svg>
-
-          <div className="motor-readout">
-            {nodePositions.map((node) => (
-              <div
-                key={`readout-${node.id}`}
-                className={activeMotorId === node.id ? "readout-chip active" : "readout-chip"}
-              >
-                <span>{node.name}</span>
-                <strong>{node.logical.toFixed(1)}°</strong>
-              </div>
-            ))}
+              return (
+                <label
+                  className={channel.enabled ? "slider-row dense" : "slider-row dense disabled"}
+                  key={channel.id}
+                >
+                  <div className="slider-meta">
+                    <strong>
+                      #{channel.id} {channel.name}
+                    </strong>
+                    <span>
+                      board {channel.board} / ch {channel.channel} / offset {channel.offset.toFixed(1)}
+                    </span>
+                    {!channel.enabled ? (
+                      <span className="channel-badge">disabled for current neck redesign</span>
+                    ) : null}
+                  </div>
+                  <input
+                    type="range"
+                    min={channel.minLogical}
+                    max={channel.maxLogical}
+                    step={0.5}
+                    value={logicalValue}
+                    disabled={!channel.enabled}
+                    onChange={(event) => handleSliderChange(channel.id, Number(event.target.value))}
+                  />
+                  <div className="value-pair">
+                    <span>L {logicalValue.toFixed(1)}</span>
+                    <span>A {appliedValue.toFixed(1)}</span>
+                  </div>
+                </label>
+              );
+            })}
           </div>
         </article>
 
-        <article className="panel blendshape-panel">
+        <article className="panel">
           <div className="panel-header">
             <div>
-              <p className="panel-kicker">Blendshape</p>
-              <h2>Realtime coefficient test panel</h2>
+              <p className="panel-kicker">Runtime</p>
+              <h2>Transport and frame monitor</h2>
             </div>
-            <p className="panel-note">Mapped in Rust before ZMQ dispatch</p>
+            <button className="secondary" onClick={refreshLastFrame}>
+              Refresh Frame
+            </button>
           </div>
 
-          <div className="slider-stack">
-            {BLENDSHAPE_NAMES.map((name) => (
-              <label className="slider-row" key={name}>
-                <span>{name}</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={blendshapes[name]}
-                  onChange={(event) => handleBlendshapeChange(name, Number(event.target.value))}
-                />
-                <strong>{blendshapes[name].toFixed(2)}</strong>
-              </label>
-            ))}
+          <div className="runtime-grid">
+            <div className="readout-chip">
+              <span>Heartbeat</span>
+              <strong>{runtime.heartbeatHz} Hz</strong>
+            </div>
+            <div className="readout-chip">
+              <span>Disabled</span>
+              <strong>{runtime.disabledMotorIds.join(", ") || "None"}</strong>
+            </div>
+            <div className="readout-chip">
+              <span>Endpoint</span>
+              <strong>{runtime.endpoint ?? "Not set"}</strong>
+            </div>
           </div>
+
+          <pre className="frame-dump">
+            {lastFrame ? JSON.stringify(lastFrame, null, 2) : "No frame captured yet."}
+          </pre>
         </article>
       </section>
     </main>

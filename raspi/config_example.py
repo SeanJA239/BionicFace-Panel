@@ -25,10 +25,8 @@ PCA9685_ADDRESSES = [
     0x42,
 ]
 
-ZMQ_BIND = "tcp://0.0.0.0:5555"
-PWM_FREQUENCY_HZ = 50
-HOME_STEP_DELAY_SEC = 0.03
-SERVO_RELEASE_ON_EXIT = False
+UDP_PORT = 6000
+BOARD_ADDRESSES = [0x40, 0x41]
 
 MOTOR_MAP = {
     0: (0, 0),
@@ -65,14 +63,16 @@ MOTOR_MAP = {
     31: (2, 5),
 }
 
-# Optional calibration layer on top of MOTOR_MAP.
-# If a motor is missing here, runtime defaults are:
-# min_angle=0, max_angle=180, zero_offset=0, home_logical=90, actuation_range=180
-MOTOR_SAFETY: dict[int, MotorSafety] = {
-    0: {"name": "eyebrow_right_inner", "min_angle": 70, "max_angle": 118, "zero_offset": 0, "home_logical": 90},
-    1: {"name": "eyebrow_right_outer", "min_angle": 68, "max_angle": 122, "zero_offset": 0, "home_logical": 90},
-    2: {"name": "eyebrow_left_inner", "min_angle": 62, "max_angle": 112, "zero_offset": 0, "home_logical": 90},
-    3: {"name": "eyebrow_left_outer", "min_angle": 64, "max_angle": 118, "zero_offset": 0, "home_logical": 90},
-    14: {"name": "upper_lip_left", "min_angle": 52, "max_angle": 128, "zero_offset": 0, "home_logical": 90},
-    15: {"name": "upper_lip_mid", "min_angle": 50, "max_angle": 126, "zero_offset": 0, "home_logical": 90},
+MOTOR_LIMITS = {
+    0: (170, 210),
+    1: (10, 40),
+    2: (170, 210),
+    3: (10, 40),
+}
+
+MOTOR_OFFSET = {
+    0: 3,
+    1: 3,
+    2: 3,
+    3: 3,
 }

@@ -4,8 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use control::{
-    AppState, BlendshapeFrame, ConnectionStatus, ControlService, MotorAdjustRequest,
-    MotorCommandFrame, MotorConfig, MotorFrameAck,
+    AppState, MotorChannel, MotorTargetUpdate, RuntimeState, TransportStatus, UdpControlFrame,
 };
 use tauri::{Manager, State};
 
@@ -13,7 +12,7 @@ use tauri::{Manager, State};
 async fn connect_pi(
     state: State<'_, Arc<AppState>>,
     endpoint: String,
-) -> Result<ConnectionStatus, String> {
+) -> Result<TransportStatus, String> {
     state.connect(endpoint).await.map_err(|err| err.to_string())
 }
 
@@ -23,76 +22,66 @@ async fn disconnect_pi(state: State<'_, Arc<AppState>>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn update_motor_config(
-    state: State<'_, Arc<AppState>>,
-    motors: Vec<MotorConfig>,
-) -> Result<(), String> {
-    state
-        .replace_motor_config(motors)
-        .await
-        .map_err(|err| err.to_string())
+async fn get_transport_status(state: State<'_, Arc<AppState>>) -> Result<TransportStatus, String> {
+    Ok(state.transport_status().await)
 }
 
 #[tauri::command]
-async fn send_motor_frame(
-    state: State<'_, Arc<AppState>>,
-    logical_angles: Vec<f32>,
-    source: Option<String>,
-) -> Result<MotorFrameAck, String> {
-    state
-        .send_motor_frame(logical_angles, source)
-        .await
-        .map_err(|err| err.to_string())
+async fn get_motor_channels(state: State<'_, Arc<AppState>>) -> Result<Vec<MotorChannel>, String> {
+    Ok(state.channels().await)
 }
 
 #[tauri::command]
-async fn send_blendshape_frame(
-    state: State<'_, Arc<AppState>>,
-    blendshape_names: Vec<String>,
-    coefficients: Vec<f32>,
-    mapping: Vec<Vec<f32>>,
-    source: Option<String>,
-) -> Result<MotorFrameAck, String> {
-    let frame = BlendshapeFrame {
-        blendshape_names,
-        coefficients,
-        mapping,
-        source,
-    };
-
-    state
-        .send_blendshape_frame(frame)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-async fn set_single_motor(
+async fn set_motor_target(
     state: State<'_, Arc<AppState>>,
     motor_id: usize,
-    logical_angle: f32,
-    source: Option<String>,
-) -> Result<MotorFrameAck, String> {
+    logical_value: f32,
+) -> Result<RuntimeState, String> {
     state
-        .set_single_motor(MotorAdjustRequest {
+        .set_motor_target(MotorTargetUpdate {
             motor_id,
-            logical_angle,
-            source,
+            logical_value,
         })
         .await
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn ping_pi(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
-    state.ping().await.map_err(|err| err.to_string())
+async fn set_all_targets(
+    state: State<'_, Arc<AppState>>,
+    logical_values: Vec<f32>,
+) -> Result<RuntimeState, String> {
+    state
+        .set_all_targets(logical_values)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn center_all(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    Ok(state.center_all().await)
+}
+
+#[tauri::command]
+async fn get_runtime_state(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    Ok(state.runtime_state().await)
 }
 
 #[tauri::command]
 async fn get_last_frame(
     state: State<'_, Arc<AppState>>,
-) -> Result<Option<MotorCommandFrame>, String> {
+) -> Result<Option<UdpControlFrame>, String> {
     Ok(state.last_frame().await)
+}
+
+#[tauri::command]
+async fn flush_current_frame(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<UdpControlFrame>, String> {
+    state
+        .flush_current_frame()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 fn init_tracing() {
@@ -110,6 +99,10 @@ fn default_log_dir(app_handle: &tauri::AppHandle) -> PathBuf {
         .join("logs")
 }
 
+fn app_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
@@ -117,19 +110,22 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let log_dir = default_log_dir(app.handle());
-            let service = tauri::async_runtime::block_on(ControlService::new(log_dir))?;
+            let service =
+                tauri::async_runtime::block_on(control::ControlService::new(log_dir, app_dir()))?;
             app.manage(Arc::new(AppState::new(service)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             connect_pi,
             disconnect_pi,
-            update_motor_config,
-            send_motor_frame,
-            send_blendshape_frame,
-            set_single_motor,
-            ping_pi,
+            get_transport_status,
+            get_motor_channels,
+            set_motor_target,
+            set_all_targets,
+            center_all,
+            get_runtime_state,
             get_last_frame,
+            flush_current_frame,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");

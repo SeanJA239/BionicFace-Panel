@@ -1,4 +1,37 @@
 # BionicFace Panel 配置与运行指南
+接下来你们实际使用时，建议固定成这条顺序：
+
+修改 config.py
+运行 python3 raspi/export_config_json.py
+启动树莓派 servo_server.py
+启动 npm run tauri dev
+## 0. 当前版本说明
+
+当前代码已切换到“可视化硬件标定与数据采集控制台”架构：
+
+- 前端：
+  - 32 个滑条直控
+- 上位机 Rust：
+  - 读取由 `raspi/config.py` 导出的 JSON 配置
+  - 执行 `clamp + offset`
+  - 以 100Hz 插值并通过 UDP JSON 下发
+- 树莓派：
+  - 作为极简 UDP 执行器
+  - 不再负责限位与插值
+
+当前配置同步入口：
+
+```bash
+python3 raspi/export_config_json.py
+```
+
+该命令会将真实配置导出到：
+
+- `src-tauri/config/motor_config.json`
+
+当前树莓派默认监听：
+
+- `0.0.0.0:6000`
 
 本文档面向项目使用者与开发者，说明如何在 macOS、Linux、Windows 上配置上位机环境，以及如何在树莓派上配置下位机控制服务。
 
@@ -6,14 +39,14 @@
 
 - 上位机：
   - Tauri 桌面应用
-  - Rust 负责控制逻辑、时间戳、日志、ZMQ 通信
+  - Rust 负责控制逻辑、时间戳、日志、UDP 通信
   - React + TypeScript 负责 UI
 - 下位机：
   - Raspberry Pi
   - Python 驱动 PCA9685 和舵机
 - 通信方式：
-  - 局域网内 ZeroMQ
-  - 默认使用 `tcp://<树莓派IP>:5555`
+  - 局域网内 UDP JSON
+  - 默认使用 `<树莓派IP>:6000`
 
 推荐网络拓扑：
 
@@ -34,9 +67,10 @@
 
 注意：
 
-- 树莓派端实际配置文件默认读取 `../bionicFace/config.py`
-- 该配置文件需要至少提供 `MOTOR_MAP`
-- 若提供 `MOTOR_SAFETY`，则会启用更严格的限位、偏置和归零参数
+- 当前项目以 `raspi/config.py` 为真实标定源
+- `python3 raspi/export_config_json.py` 会把其导出为 `src-tauri/config/motor_config.json`
+- 当前上位机负责 `clamp + offset + interpolation`
+- 当前树莓派只负责执行最终角度数组
 
 ## 3. 上位机通用前置要求
 
@@ -241,11 +275,11 @@ npm run tauri build
 - 通过 `npm run tauri dev` 或构建后的安装包运行
 - 前端界面运行在本地桌面容器中
 - Rust 后端命令可正常调用
-- 可以执行：
-  - ZMQ 通信
+  - 可以执行：
+  - UDP 下发
   - 日志写入
   - 单电机控制
-  - Blendshape 下发
+  - 32 通道标定
 
 ### 7.2 纯浏览器 localhost 模式
 
@@ -351,7 +385,7 @@ source .venv/bin/activate
 
 ```bash
 pip install --upgrade pip
-pip install pyzmq adafruit-circuitpython-servokit
+pip install adafruit-circuitpython-servokit
 ```
 
 如果你还要直接使用底层 GPIO/I2C 调试工具，也可以补充：
@@ -362,9 +396,9 @@ pip install adafruit-blinka
 
 ## 11. 树莓派配置文件说明
 
-本项目树莓派脚本默认读取：
+本项目树莓派执行器默认读取：
 
-- `../bionicFace/config.py`
+- `raspi/config.py`
 
 最少需要定义：
 
@@ -384,33 +418,29 @@ MOTOR_MAP = {
 - value 第 1 项：板卡索引
 - value 第 2 项：PCA9685 channel
 
-可选安全参数：
+当前上位机配置导出依赖的典型字段：
 
 ```python
-PCA9685_ADDRESSES = [0x40, 0x41, 0x42]
-ZMQ_BIND = "tcp://0.0.0.0:5555"
-PWM_FREQUENCY_HZ = 50
-HOME_STEP_DELAY_SEC = 0.03
-SERVO_RELEASE_ON_EXIT = False
+BOARD_ADDRESSES = [0x40, 0x41]
+UDP_PORT = 6000
 
-MOTOR_SAFETY = {
-    0: {
-        "name": "eyebrow_right_inner",
-        "min_angle": 70,
-        "max_angle": 118,
-        "zero_offset": 0,
-        "home_logical": 90,
-        "actuation_range": 180,
-    }
+MOTOR_LIMITS = {
+    0: (170, 210),
+    1: (10, 40),
+}
+
+MOTOR_OFFSET = {
+    0: 3,
+    1: 3,
 }
 ```
 
 说明：
 
-- `min_angle` / `max_angle`：树莓派端最终物理限位
-- `zero_offset`：零位补偿
-- `home_logical`：开机归零的逻辑角
-- `actuation_range`：舵机角度范围
+- `BOARD_ADDRESSES`：PCA9685 地址列表
+- `UDP_PORT`：树莓派监听端口
+- `MOTOR_LIMITS`：物理最终角度范围
+- `MOTOR_OFFSET`：零位补偿
 
 ## 12. 树莓派控制服务启动
 
@@ -424,15 +454,14 @@ python3 raspi/servo_server.py
 
 默认情况下：
 
-- 服务会读取 `../bionicFace/config.py`
+- 服务会读取 `raspi/config.py`
 - 初始化 PCA9685
-- 执行归零动作
-- 启动 ZMQ REP 服务
+- 启动 UDP 执行器
 
 如果你想显式指定配置文件路径，可以设置环境变量：
 
 ```bash
-export BIONIC_FACE_CONFIG=/home/pi/bionicFace/config.py
+export BIONIC_FACE_CONFIG=/home/pi/BionicFace-Panel/raspi/config.py
 python3 raspi/servo_server.py
 ```
 
@@ -456,7 +485,7 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/BionicFace-Panel
-Environment=BIONIC_FACE_CONFIG=/home/pi/bionicFace/config.py
+Environment=BIONIC_FACE_CONFIG=/home/pi/BionicFace-Panel/raspi/config.py
 ExecStart=/home/pi/bionicFace/.venv/bin/python3 /home/pi/BionicFace-Panel/raspi/servo_server.py
 Restart=always
 RestartSec=2
@@ -506,7 +535,7 @@ hostname -I
 确认树莓派服务已运行，监听：
 
 ```text
-tcp://0.0.0.0:5555
+0.0.0.0:6000
 ```
 
 ### 14.3 启动桌面端
@@ -520,18 +549,18 @@ npm run tauri dev
 然后在 UI 中将 Endpoint 设置为：
 
 ```text
-tcp://192.168.1.50:5555
+192.168.1.50:6000
 ```
 
 点击：
 
 - `Connect`
-- `Ping`
+- `Center All`
+- `Flush`
 
 若连接成功，即可开始：
 
-- 拖拽电机节点
-- 使用 Blendshape 滑杆
+- 调整 32 个电机滑条
 - 查看上位机本地日志
 
 ## 15. 常见问题排查

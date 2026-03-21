@@ -1,128 +1,106 @@
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
+use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 const MOTOR_COUNT: usize = 32;
+const HEARTBEAT_HZ: u64 = 100;
+const MAX_STEP_PER_TICK_DEG: f32 = 2.0;
+const CONFIG_PATH: &str = "config/motor_config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MotorConfig {
+#[serde(rename_all = "camelCase")]
+pub struct MotorChannel {
     pub id: usize,
     pub name: String,
-    pub min_angle: f32,
-    pub max_angle: f32,
-    pub zero_offset: f32,
-    pub home_logical: f32,
+    pub board: usize,
+    pub channel: usize,
+    pub board_address: u16,
+    pub min_applied: f32,
+    pub max_applied: f32,
+    pub offset: f32,
+    pub min_logical: f32,
+    pub max_logical: f32,
+    pub neutral_applied: f32,
+    pub neutral_logical: f32,
+    pub enabled: bool,
 }
 
-impl MotorConfig {
-    fn apply(&self, logical: f32) -> f32 {
-        (logical + self.zero_offset).clamp(self.min_angle, self.max_angle)
+impl MotorChannel {
+    fn logical_to_applied(&self, logical: f32) -> f32 {
+        if !self.enabled {
+            return self.neutral_applied;
+        }
+        let logical = logical.clamp(self.min_logical, self.max_logical);
+        (logical + self.offset).clamp(self.min_applied, self.max_applied)
+    }
+
+    fn normalized_logical(&self, logical: f32) -> f32 {
+        if !self.enabled {
+            self.neutral_logical
+        } else {
+            logical.clamp(self.min_logical, self.max_logical)
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlendshapeFrame {
-    pub blendshape_names: Vec<String>,
-    pub coefficients: Vec<f32>,
-    pub mapping: Vec<Vec<f32>>,
-    pub source: Option<String>,
+#[serde(rename_all = "camelCase")]
+struct ConfigFile {
+    transport: TransportConfig,
+    channels: Vec<MotorChannel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MotorCommandFrame {
+#[serde(rename_all = "camelCase")]
+struct TransportConfig {
+    host: String,
+    port: u16,
+    board_addresses: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeState {
+    pub endpoint: Option<String>,
+    pub heartbeat_hz: u64,
+    pub disabled_motor_ids: Vec<usize>,
+    pub target_logical: Vec<f32>,
+    pub target_applied: Vec<f32>,
+    pub current_applied: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UdpControlFrame {
     pub frame_id: u64,
     pub timestamp_ns: u128,
     pub timestamp_rfc3339: String,
     pub source: String,
-    pub logical_angles: Vec<f32>,
-    pub applied_angles: Vec<f32>,
+    pub angles: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MotorFrameAck {
-    pub ok: bool,
-    pub frame_id: u64,
-    pub timestamp_ns: u128,
-    pub endpoint: String,
-    pub reply: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MotorAdjustRequest {
-    pub motor_id: usize,
-    pub logical_angle: f32,
-    pub source: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionStatus {
+#[serde(rename_all = "camelCase")]
+pub struct TransportStatus {
     pub connected: bool,
     pub endpoint: Option<String>,
+    pub heartbeat_hz: u64,
 }
 
-#[derive(Default)]
-struct ZmqClient {
-    context: Option<zmq::Context>,
-    endpoint: Option<String>,
-    socket: Option<zmq::Socket>,
-}
-
-impl ZmqClient {
-    fn connect(&mut self, endpoint: &str) -> Result<ConnectionStatus> {
-        if self.socket.is_some() {
-            self.disconnect()?;
-        }
-
-        let context = zmq::Context::new();
-        let socket = context.socket(zmq::REQ)?;
-        socket.set_linger(0)?;
-        socket.set_rcvtimeo(100)?;
-        socket.set_sndtimeo(100)?;
-        socket.connect(endpoint)?;
-
-        self.context = Some(context);
-        self.endpoint = Some(endpoint.to_string());
-        self.socket = Some(socket);
-
-        Ok(ConnectionStatus {
-            connected: true,
-            endpoint: self.endpoint.clone(),
-        })
-    }
-
-    fn disconnect(&mut self) -> Result<()> {
-        if let Some(socket) = self.socket.take() {
-            socket.disconnect(self.endpoint.as_deref().unwrap_or_default())?;
-        }
-        self.endpoint = None;
-        self.context = None;
-        Ok(())
-    }
-
-    fn send_json(&self, value: &serde_json::Value) -> Result<serde_json::Value> {
-        let socket = self
-            .socket
-            .as_ref()
-            .ok_or_else(|| anyhow!("ZMQ endpoint is not connected"))?;
-
-        socket.send(serde_json::to_vec(value)?, 0)?;
-        let message = socket.recv_msg(0)?;
-        Ok(serde_json::from_slice(message.as_ref())?)
-    }
-
-    fn endpoint(&self) -> Result<String> {
-        self.endpoint
-            .clone()
-            .ok_or_else(|| anyhow!("ZMQ endpoint is not connected"))
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotorTargetUpdate {
+    pub motor_id: usize,
+    pub logical_value: f32,
 }
 
 struct FrameLogger {
@@ -134,8 +112,8 @@ impl FrameLogger {
     async fn new(dir: &Path) -> Result<Self> {
         tokio::fs::create_dir_all(dir).await?;
 
-        let jsonl_path = dir.join("motor_frames.jsonl");
-        let csv_path = dir.join("motor_frames.csv");
+        let jsonl_path = dir.join("udp_frames.jsonl");
+        let csv_path = dir.join("udp_frames.csv");
 
         let jsonl_file = OpenOptions::new()
             .create(true)
@@ -149,7 +127,7 @@ impl FrameLogger {
         let mut csv_writer = csv::WriterBuilder::new()
             .has_headers(false)
             .from_writer(csv_file);
-        write_csv_header_if_empty(dir.join("motor_frames.csv"), &mut csv_writer)?;
+        write_csv_header_if_empty(dir.join("udp_frames.csv"), &mut csv_writer)?;
 
         Ok(Self {
             jsonl: Mutex::new(BufWriter::new(jsonl_file)),
@@ -157,7 +135,7 @@ impl FrameLogger {
         })
     }
 
-    async fn append(&self, frame: &MotorCommandFrame) -> Result<()> {
+    async fn append(&self, frame: &UdpControlFrame) -> Result<()> {
         let encoded = serde_json::to_vec(frame)?;
         {
             let mut writer = self.jsonl.lock().await;
@@ -168,17 +146,12 @@ impl FrameLogger {
 
         {
             let mut csv_writer = self.csv.lock().await;
-            let mut row = Vec::with_capacity(4 + frame.applied_angles.len());
+            let mut row = Vec::with_capacity(4 + frame.angles.len());
             row.push(frame.frame_id.to_string());
             row.push(frame.timestamp_ns.to_string());
             row.push(frame.timestamp_rfc3339.clone());
             row.push(frame.source.clone());
-            row.extend(
-                frame
-                    .applied_angles
-                    .iter()
-                    .map(|value| format!("{value:.4}")),
-            );
+            row.extend(frame.angles.iter().map(|value| format!("{value:.4}")));
             csv_writer.write_record(row)?;
             csv_writer.flush()?;
         }
@@ -207,156 +180,152 @@ fn write_csv_header_if_empty(path: PathBuf, writer: &mut csv::Writer<std::fs::Fi
 
 struct InnerState {
     frame_seq: u64,
-    motor_config: Vec<MotorConfig>,
-    last_frame: Option<MotorCommandFrame>,
-    zmq: ZmqClient,
+    channels: Vec<MotorChannel>,
+    endpoint: Option<SocketAddr>,
+    target_logical: Vec<f32>,
+    target_applied: Vec<f32>,
+    current_applied: Vec<f32>,
+    last_frame: Option<UdpControlFrame>,
 }
 
 pub struct ControlService {
     logger: Arc<FrameLogger>,
-    state: Mutex<InnerState>,
+    state: Arc<Mutex<InnerState>>,
 }
 
 impl ControlService {
-    pub async fn new(log_dir: PathBuf) -> Result<Self> {
+    pub async fn new(log_dir: PathBuf, app_dir: PathBuf) -> Result<Self> {
         let logger = Arc::new(FrameLogger::new(&log_dir).await?);
+        let config = load_config(&app_dir)?;
+        let channels = normalize_channels(config.channels)?;
 
-        Ok(Self {
-            logger,
-            state: Mutex::new(InnerState {
-                frame_seq: 0,
-                motor_config: default_motor_config(),
-                last_frame: None,
-                zmq: ZmqClient::default(),
-            }),
-        })
+        let target_logical = channels
+            .iter()
+            .map(|channel| channel.neutral_logical)
+            .collect();
+        let target_applied = channels
+            .iter()
+            .map(|channel| channel.neutral_applied)
+            .collect();
+        let current_applied = channels
+            .iter()
+            .map(|channel| channel.neutral_applied)
+            .collect();
+
+        let state = Arc::new(Mutex::new(InnerState {
+            frame_seq: 0,
+            channels,
+            endpoint: None,
+            target_logical,
+            target_applied,
+            current_applied,
+            last_frame: None,
+        }));
+
+        spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger));
+
+        Ok(Self { logger, state })
     }
 
-    pub async fn connect(&self, endpoint: String) -> Result<ConnectionStatus> {
+    pub async fn connect(&self, endpoint: String) -> Result<TransportStatus> {
+        let endpoint: SocketAddr = endpoint
+            .parse()
+            .with_context(|| format!("invalid UDP endpoint: {endpoint}"))?;
         let mut state = self.state.lock().await;
-        let status = state.zmq.connect(&endpoint)?;
-        info!("Connected to Pi endpoint {}", endpoint);
-        Ok(status)
+        state.endpoint = Some(endpoint);
+        info!("UDP executor connected to {}", endpoint);
+        Ok(TransportStatus {
+            connected: true,
+            endpoint: Some(endpoint.to_string()),
+            heartbeat_hz: HEARTBEAT_HZ,
+        })
     }
 
     pub async fn disconnect(&self) -> Result<()> {
         let mut state = self.state.lock().await;
-        state.zmq.disconnect()?;
-        info!("Disconnected from Pi endpoint");
+        state.endpoint = None;
         Ok(())
     }
 
-    pub async fn replace_motor_config(&self, motors: Vec<MotorConfig>) -> Result<()> {
-        let mut state = self.state.lock().await;
-        state.motor_config = normalize_motor_config(motors)?;
-        Ok(())
-    }
-
-    pub async fn ping(&self) -> Result<serde_json::Value> {
+    pub async fn transport_status(&self) -> TransportStatus {
         let state = self.state.lock().await;
-        state
-            .zmq
-            .send_json(&serde_json::json!({ "command": "ping" }))
+        TransportStatus {
+            connected: state.endpoint.is_some(),
+            endpoint: state.endpoint.map(|value| value.to_string()),
+            heartbeat_hz: HEARTBEAT_HZ,
+        }
     }
 
-    pub async fn send_blendshape_frame(&self, frame: BlendshapeFrame) -> Result<MotorFrameAck> {
-        if frame.coefficients.len() != frame.blendshape_names.len() {
-            bail!("blendshape_names and coefficients length mismatch");
-        }
-        if frame.mapping.len() != MOTOR_COUNT {
-            bail!("mapping must contain exactly 32 motor rows");
-        }
-        if frame
-            .mapping
-            .iter()
-            .any(|row| row.len() != frame.coefficients.len())
-        {
-            bail!("each mapping row length must equal blendshape count");
-        }
-
-        let logical_angles = frame
-            .mapping
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .zip(frame.coefficients.iter())
-                    .fold(0.0_f32, |sum, (weight, coeff)| sum + weight * coeff)
-            })
-            .collect::<Vec<_>>();
-
-        self.send_motor_frame(logical_angles, frame.source).await
+    pub async fn channels(&self) -> Vec<MotorChannel> {
+        let state = self.state.lock().await;
+        state.channels.clone()
     }
 
-    pub async fn send_motor_frame(
-        &self,
-        logical_angles: Vec<f32>,
-        source: Option<String>,
-    ) -> Result<MotorFrameAck> {
-        if logical_angles.len() != MOTOR_COUNT {
-            bail!("logical_angles must contain exactly 32 values");
+    pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
+        let mut state = self.state.lock().await;
+        if update.motor_id >= MOTOR_COUNT {
+            bail!("motor_id {} out of range", update.motor_id);
         }
-
-        let frame = {
-            let mut state = self.state.lock().await;
-            let next_frame_seq = state.frame_seq + 1;
-            let motor_config = state.motor_config.clone();
-            state.frame_seq = next_frame_seq;
-            build_frame(
-                next_frame_seq,
-                &motor_config,
-                logical_angles,
-                source.unwrap_or_else(|| "ui".to_string()),
-            )?
-        };
-
-        self.logger.append(&frame).await?;
-
-        let (endpoint, reply) = {
-            let mut state = self.state.lock().await;
-            let endpoint = state.zmq.endpoint()?;
-            let payload = serde_json::json!({
-                "command": "set_all",
-                "frame_id": frame.frame_id,
-                "timestamp_ns": frame.timestamp_ns,
-                "logical_angles": frame.logical_angles,
-                "applied_angles": frame.applied_angles,
-            });
-            let reply = state.zmq.send_json(&payload)?;
-            state.last_frame = Some(frame.clone());
-            (endpoint, reply)
-        };
-
-        Ok(MotorFrameAck {
-            ok: true,
-            frame_id: frame.frame_id,
-            timestamp_ns: frame.timestamp_ns,
-            endpoint,
-            reply,
-        })
+        let channel = state.channels[update.motor_id].clone();
+        state.target_logical[update.motor_id] = channel.normalized_logical(update.logical_value);
+        state.target_applied[update.motor_id] = channel.logical_to_applied(update.logical_value);
+        Ok(build_runtime_state(&state))
     }
 
-    pub async fn set_single_motor(&self, request: MotorAdjustRequest) -> Result<MotorFrameAck> {
-        if request.motor_id >= MOTOR_COUNT {
-            bail!("motor_id {} out of range", request.motor_id);
+    pub async fn set_all_targets(&self, logical_values: Vec<f32>) -> Result<RuntimeState> {
+        if logical_values.len() != MOTOR_COUNT {
+            bail!("logical_values must contain exactly 32 items");
         }
 
-        let logical_angles = {
-            let state = self.state.lock().await;
-            let mut logical = state
-                .last_frame
-                .as_ref()
-                .map(|frame| frame.logical_angles.clone())
-                .unwrap_or_else(|| vec![0.0; MOTOR_COUNT]);
-            logical[request.motor_id] = request.logical_angle;
-            logical
-        };
-
-        self.send_motor_frame(logical_angles, request.source).await
+        let mut state = self.state.lock().await;
+        for (motor_id, logical) in logical_values.into_iter().enumerate() {
+            let channel = state.channels[motor_id].clone();
+            state.target_logical[motor_id] = channel.normalized_logical(logical);
+            state.target_applied[motor_id] = channel.logical_to_applied(logical);
+        }
+        Ok(build_runtime_state(&state))
     }
 
-    pub async fn last_frame(&self) -> Option<MotorCommandFrame> {
+    pub async fn center_all(&self) -> RuntimeState {
+        let mut state = self.state.lock().await;
+        let channels = state.channels.clone();
+        for (index, channel) in channels.iter().enumerate() {
+            state.target_logical[index] = channel.neutral_logical;
+            state.target_applied[index] = channel.neutral_applied;
+        }
+        build_runtime_state(&state)
+    }
+
+    pub async fn runtime_state(&self) -> RuntimeState {
+        let state = self.state.lock().await;
+        build_runtime_state(&state)
+    }
+
+    pub async fn last_frame(&self) -> Option<UdpControlFrame> {
         let state = self.state.lock().await;
         state.last_frame.clone()
+    }
+
+    pub async fn flush_current_frame(&self) -> Result<Option<UdpControlFrame>> {
+        let state = self.state.lock().await;
+        let endpoint = match state.endpoint {
+            Some(endpoint) => endpoint,
+            None => return Ok(None),
+        };
+        let frame = build_frame(
+            state.frame_seq + 1,
+            "manual-flush".to_string(),
+            state.current_applied.clone(),
+        )?;
+        drop(state);
+
+        send_frame(endpoint, &frame)?;
+        self.logger.append(&frame).await?;
+
+        let mut state = self.state.lock().await;
+        state.frame_seq = frame.frame_id;
+        state.last_frame = Some(frame.clone());
+        Ok(Some(frame))
     }
 }
 
@@ -369,7 +338,7 @@ impl AppState {
         Self { service }
     }
 
-    pub async fn connect(&self, endpoint: String) -> Result<ConnectionStatus> {
+    pub async fn connect(&self, endpoint: String) -> Result<TransportStatus> {
         self.service.connect(endpoint).await
     }
 
@@ -377,102 +346,186 @@ impl AppState {
         self.service.disconnect().await
     }
 
-    pub async fn replace_motor_config(&self, motors: Vec<MotorConfig>) -> Result<()> {
-        self.service.replace_motor_config(motors).await
+    pub async fn transport_status(&self) -> TransportStatus {
+        self.service.transport_status().await
     }
 
-    pub async fn send_motor_frame(
-        &self,
-        logical_angles: Vec<f32>,
-        source: Option<String>,
-    ) -> Result<MotorFrameAck> {
-        self.service.send_motor_frame(logical_angles, source).await
+    pub async fn channels(&self) -> Vec<MotorChannel> {
+        self.service.channels().await
     }
 
-    pub async fn set_single_motor(&self, request: MotorAdjustRequest) -> Result<MotorFrameAck> {
-        self.service.set_single_motor(request).await
+    pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
+        self.service.set_motor_target(update).await
     }
 
-    pub async fn send_blendshape_frame(&self, frame: BlendshapeFrame) -> Result<MotorFrameAck> {
-        self.service.send_blendshape_frame(frame).await
+    pub async fn set_all_targets(&self, logical_values: Vec<f32>) -> Result<RuntimeState> {
+        self.service.set_all_targets(logical_values).await
     }
 
-    pub async fn ping(&self) -> Result<serde_json::Value> {
-        self.service.ping().await
+    pub async fn center_all(&self) -> RuntimeState {
+        self.service.center_all().await
     }
 
-    pub async fn last_frame(&self) -> Option<MotorCommandFrame> {
+    pub async fn runtime_state(&self) -> RuntimeState {
+        self.service.runtime_state().await
+    }
+
+    pub async fn last_frame(&self) -> Option<UdpControlFrame> {
         self.service.last_frame().await
+    }
+
+    pub async fn flush_current_frame(&self) -> Result<Option<UdpControlFrame>> {
+        self.service.flush_current_frame().await
     }
 }
 
-fn build_frame(
-    frame_seq: u64,
-    motor_config: &[MotorConfig],
-    logical_angles: Vec<f32>,
-    source: String,
-) -> Result<MotorCommandFrame> {
-    if motor_config.len() != MOTOR_COUNT {
-        bail!("motor_config must contain exactly 32 entries");
+fn load_config(app_dir: &Path) -> Result<ConfigFile> {
+    let config_path = app_dir.join(CONFIG_PATH);
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read motor config {}", config_path.display()))?;
+    let config = serde_json::from_str::<ConfigFile>(&raw)
+        .with_context(|| format!("failed to parse motor config {}", config_path.display()))?;
+    Ok(config)
+}
+
+fn normalize_channels(channels: Vec<MotorChannel>) -> Result<Vec<MotorChannel>> {
+    if channels.len() != MOTOR_COUNT {
+        bail!("motor config must contain exactly 32 channels");
     }
 
+    let mut slots = vec![None; MOTOR_COUNT];
+    for channel in channels {
+        let channel_id = channel.id;
+        if channel.id >= MOTOR_COUNT {
+            bail!("channel id {} out of range", channel.id);
+        }
+        if channel.min_applied > channel.max_applied {
+            bail!("channel {} has inverted applied range", channel.id);
+        }
+        if channel.min_logical > channel.max_logical {
+            bail!("channel {} has inverted logical range", channel.id);
+        }
+        if slots[channel_id].is_some() {
+            bail!("duplicate channel id {}", channel_id);
+        }
+        slots[channel_id] = Some(channel);
+    }
+
+    slots
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| anyhow!("motor config missing channel ids"))
+}
+
+fn build_runtime_state(state: &InnerState) -> RuntimeState {
+    RuntimeState {
+        endpoint: state.endpoint.map(|value| value.to_string()),
+        heartbeat_hz: HEARTBEAT_HZ,
+        disabled_motor_ids: state
+            .channels
+            .iter()
+            .filter(|channel| !channel.enabled)
+            .map(|channel| channel.id)
+            .collect(),
+        target_logical: state.target_logical.clone(),
+        target_applied: state.target_applied.clone(),
+        current_applied: state.current_applied.clone(),
+    }
+}
+
+fn build_frame(frame_id: u64, source: String, angles: Vec<f32>) -> Result<UdpControlFrame> {
     let timestamp_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX_EPOCH")?
         .as_nanos();
     let timestamp_rfc3339 = DateTime::<Utc>::from(SystemTime::now())
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-    let applied_angles = logical_angles
-        .iter()
-        .zip(motor_config.iter())
-        .map(|(angle, config)| config.apply(*angle))
-        .collect::<Vec<_>>();
-
-    Ok(MotorCommandFrame {
-        frame_id: frame_seq,
+    Ok(UdpControlFrame {
+        frame_id,
         timestamp_ns,
         timestamp_rfc3339,
         source,
-        logical_angles,
-        applied_angles,
+        angles,
     })
 }
 
-fn default_motor_config() -> Vec<MotorConfig> {
-    (0..MOTOR_COUNT)
-        .map(|id| MotorConfig {
-            id,
-            name: format!("motor_{id:02}"),
-            min_angle: 0.0,
-            max_angle: 180.0,
-            zero_offset: 0.0,
-            home_logical: 90.0,
-        })
-        .collect()
+fn step_towards(current: f32, target: f32) -> f32 {
+    let delta = target - current;
+    if delta.abs() <= MAX_STEP_PER_TICK_DEG {
+        target
+    } else {
+        current + delta.signum() * MAX_STEP_PER_TICK_DEG
+    }
 }
 
-fn normalize_motor_config(motors: Vec<MotorConfig>) -> Result<Vec<MotorConfig>> {
-    if motors.len() != MOTOR_COUNT {
-        bail!("motor config must contain exactly 32 entries");
-    }
+fn spawn_udp_heartbeat(state: Arc<Mutex<InnerState>>, logger: Arc<FrameLogger>) {
+    tauri::async_runtime::spawn(async move {
+        let socket = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => socket,
+            Err(error) => {
+                warn!("failed to bind UDP socket for heartbeat: {error}");
+                return;
+            }
+        };
 
-    let mut slots = vec![None; MOTOR_COUNT];
-    for motor in motors {
-        let motor_id = motor.id;
-        if motor_id >= MOTOR_COUNT {
-            bail!("motor id {} out of range", motor_id);
-        }
-        if motor.min_angle > motor.max_angle {
-            bail!("motor id {} has inverted min/max", motor_id);
-        }
-        if slots[motor_id].is_some() {
-            bail!("duplicate motor id {}", motor_id);
-        }
-        slots[motor_id] = Some(motor);
-    }
+        let mut ticker = tokio::time::interval(Duration::from_millis(1000 / HEARTBEAT_HZ));
+        loop {
+            ticker.tick().await;
 
-    slots
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| anyhow!("motor config missing required ids"))
+            let maybe_frame = {
+                let mut state = state.lock().await;
+                if let Some(endpoint) = state.endpoint {
+                    for index in 0..MOTOR_COUNT {
+                        state.current_applied[index] =
+                            step_towards(state.current_applied[index], state.target_applied[index]);
+                    }
+
+                    state.frame_seq += 1;
+                    let frame = match build_frame(
+                        state.frame_seq,
+                        "udp-heartbeat".to_string(),
+                        state.current_applied.clone(),
+                    ) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            warn!("failed to build UDP frame: {error}");
+                            continue;
+                        }
+                    };
+                    state.last_frame = Some(frame.clone());
+                    Some((endpoint, frame))
+                } else {
+                    None
+                }
+            };
+
+            let Some((endpoint, frame)) = maybe_frame else {
+                continue;
+            };
+
+            let payload = match serde_json::to_vec(&frame) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    warn!("failed to encode UDP frame: {error}");
+                    continue;
+                }
+            };
+
+            if let Err(error) = socket.send_to(&payload, endpoint) {
+                warn!("failed to send UDP frame to {endpoint}: {error}");
+                continue;
+            }
+
+            if let Err(error) = logger.append(&frame).await {
+                warn!("failed to append UDP frame log: {error}");
+            }
+        }
+    });
+}
+
+fn send_frame(endpoint: SocketAddr, frame: &UdpControlFrame) -> Result<()> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    let payload = serde_json::to_vec(frame)?;
+    socket.send_to(&payload, endpoint)?;
+    Ok(())
 }

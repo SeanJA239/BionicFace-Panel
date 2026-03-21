@@ -25,7 +25,7 @@
 
 位置：
 
-- [src/App.tsx](/Users/seanja/Developer/BionicFace-Panel/src/App.tsx)
+- [src/App.tsx](src/App.tsx)
 
 作用：
 
@@ -38,8 +38,8 @@
 
 位置：
 
-- [src-tauri/src/main.rs](/Users/seanja/Developer/BionicFace-Panel/src-tauri/src/main.rs)
-- [src-tauri/src/control.rs](/Users/seanja/Developer/BionicFace-Panel/src-tauri/src/control.rs)
+- [src-tauri/src/main.rs](src-tauri/src/main.rs)
+- [src-tauri/src/control.rs](src-tauri/src/control.rs)
 
 作用：
 
@@ -53,7 +53,7 @@
 
 位置：
 
-- [raspi/servo_server.py](/Users/seanja/Developer/BionicFace-Panel/raspi/servo_server.py)
+- [raspi/servo_server.py](raspi/servo_server.py)
 
 作用：
 
@@ -119,7 +119,7 @@ Rust -> UDP JSON -> Raspberry Pi
 
 唯一真实标定源是：
 
-- [raspi/config.py](/Users/seanja/Developer/BionicFace-Panel/raspi/config.py)
+- [raspi/config.py](raspi/config.py)
 
 这个文件当前定义：
 
@@ -137,7 +137,7 @@ Rust 不直接解析 Python。
 
 所以我们通过导出脚本把 `config.py` 转成 JSON：
 
-- [raspi/export_config_json.py](/Users/seanja/Developer/BionicFace-Panel/raspi/export_config_json.py)
+- [raspi/export_config_json.py](raspi/export_config_json.py)
 
 执行：
 
@@ -147,7 +147,7 @@ python3 raspi/export_config_json.py
 
 导出结果：
 
-- [motor_config.json](/Users/seanja/Developer/BionicFace-Panel/src-tauri/config/motor_config.json)
+- [src-tauri/config/motor_config.json](src-tauri/config/motor_config.json)
 
 Rust 启动时读取这份 JSON。
 
@@ -184,22 +184,22 @@ applied = clamp(logical + offset, minApplied, maxApplied)
 
 ## 关键文件总览
 
-- [raspi/config.py](/Users/seanja/Developer/BionicFace-Panel/raspi/config.py)
+- [raspi/config.py](raspi/config.py)
   - 硬件标定源
-- [raspi/export_config_json.py](/Users/seanja/Developer/BionicFace-Panel/raspi/export_config_json.py)
+- [raspi/export_config_json.py](raspi/export_config_json.py)
   - Python 配置导出到 Rust JSON
-- [raspi/servo_server.py](/Users/seanja/Developer/BionicFace-Panel/raspi/servo_server.py)
+- [raspi/servo_server.py](raspi/servo_server.py)
   - 树莓派 UDP 执行器
-- [src-tauri/src/control.rs](/Users/seanja/Developer/BionicFace-Panel/src-tauri/src/control.rs)
+- [src-tauri/src/control.rs](src-tauri/src/control.rs)
   - Rust 控制核心
-- [src/App.tsx](/Users/seanja/Developer/BionicFace-Panel/src/App.tsx)
+- [src/App.tsx](src/App.tsx)
   - 前端控制台 UI
-- [docs/setup_guide_zh.md](/Users/seanja/Developer/BionicFace-Panel/docs/setup_guide_zh.md)
+- [docs/setup_guide_zh.md](docs/setup_guide_zh.md)
   - 环境配置与部署文档
 
 ## 当前建议工作流
 
-1. 修改 [config.py](/Users/seanja/Developer/BionicFace-Panel/raspi/config.py)
+1. 修改 [raspi/config.py](raspi/config.py)
 2. 运行 `python3 raspi/export_config_json.py`
 3. 启动树莓派执行器
 4. 启动 `npm run tauri dev`

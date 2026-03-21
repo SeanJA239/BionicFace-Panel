@@ -16,5 +16,3 @@ tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-zmq = "0.10"
-

@@ -147,6 +147,10 @@ h2 {
   align-items: start;
 }
 
+.workspace-grid.single {
+  grid-template-columns: 1.5fr 0.9fr;
+}
+
 .panel {
   border-radius: 28px;
   padding: 24px;
@@ -262,6 +266,71 @@ h2 {
   border-radius: 18px;
   background: rgba(15, 23, 42, 0.55);
   border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.slider-row.dense {
+  grid-template-columns: minmax(220px, 1.1fr) 1fr auto;
+}
+
+.slider-row.disabled {
+  opacity: 0.58;
+}
+
+.slider-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.slider-meta strong {
+  color: #f8fafc;
+  font-size: 0.92rem;
+}
+
+.slider-meta span {
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+
+.channel-badge {
+  width: fit-content;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.value-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: right;
+  color: #7dd3fc;
+  min-width: 70px;
+}
+
+.calibration-grid {
+  gap: 10px;
+}
+
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.frame-dump {
+  margin: 18px 0 0;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(2, 6, 23, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  color: #cbd5e1;
+  overflow: auto;
+  min-height: 260px;
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .slider-row span {

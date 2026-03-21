@@ -1,1 +1,48 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Rust / Tauri
 target/
+src-tauri/target/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Logs / runtime output
+logs/
+*.log
+*.out
+*.err
+error.txt
+
+# Environment / local overrides
+.env
+.env.local
+.env.*.local
+
+# Temporary / backup files
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
+
+# Local Python cache on macOS
+.Python

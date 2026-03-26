@@ -14,7 +14,7 @@ import {
   type UdpControlFrame,
 } from "./tauri";
 
-const DEFAULT_ENDPOINT = "192.168.1.50:6000";
+const DEFAULT_ENDPOINT = "192.168.137.93:6000";
 const MOTOR_COUNT = 32;
 
 function fallbackRuntime(): RuntimeState {

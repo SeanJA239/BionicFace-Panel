@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::net::{SocketAddr, UdpSocket};
@@ -57,6 +58,7 @@ impl MotorChannel {
 struct ConfigFile {
     transport: TransportConfig,
     channels: Vec<MotorChannel>,
+    jaw_coupling: Option<JawCouplingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,15 @@ struct TransportConfig {
     host: String,
     port: u16,
     board_addresses: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JawCouplingConfig {
+    master_motor_id: usize,
+    slave_motor_ids: Vec<usize>,
+    ratio: f32,
+    directions: BTreeMap<usize, f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +192,7 @@ fn write_csv_header_if_empty(path: PathBuf, writer: &mut csv::Writer<std::fs::Fi
 struct InnerState {
     frame_seq: u64,
     channels: Vec<MotorChannel>,
+    jaw_coupling: Option<JawCouplingConfig>,
     endpoint: Option<SocketAddr>,
     target_logical: Vec<f32>,
     target_applied: Vec<f32>,
@@ -198,6 +210,7 @@ impl ControlService {
         let logger = Arc::new(FrameLogger::new(&log_dir).await?);
         let config = load_config(&app_dir)?;
         let channels = normalize_channels(config.channels)?;
+        let jaw_coupling = normalize_jaw_coupling(config.jaw_coupling, &channels)?;
 
         let target_logical = channels
             .iter()
@@ -215,6 +228,7 @@ impl ControlService {
         let state = Arc::new(Mutex::new(InnerState {
             frame_seq: 0,
             channels,
+            jaw_coupling,
             endpoint: None,
             target_logical,
             target_applied,
@@ -266,9 +280,8 @@ impl ControlService {
         if update.motor_id >= MOTOR_COUNT {
             bail!("motor_id {} out of range", update.motor_id);
         }
-        let channel = state.channels[update.motor_id].clone();
-        state.target_logical[update.motor_id] = channel.normalized_logical(update.logical_value);
-        state.target_applied[update.motor_id] = channel.logical_to_applied(update.logical_value);
+        apply_motor_target(&mut state, update.motor_id, update.logical_value);
+        maybe_apply_jaw_coupling(&mut state, update.motor_id);
         Ok(build_runtime_state(&state))
     }
 
@@ -279,10 +292,9 @@ impl ControlService {
 
         let mut state = self.state.lock().await;
         for (motor_id, logical) in logical_values.into_iter().enumerate() {
-            let channel = state.channels[motor_id].clone();
-            state.target_logical[motor_id] = channel.normalized_logical(logical);
-            state.target_applied[motor_id] = channel.logical_to_applied(logical);
+            apply_motor_target(&mut state, motor_id, logical);
         }
+        maybe_apply_jaw_coupling_from_master(&mut state);
         Ok(build_runtime_state(&state))
     }
 
@@ -415,6 +427,118 @@ fn normalize_channels(channels: Vec<MotorChannel>) -> Result<Vec<MotorChannel>> 
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| anyhow!("motor config missing channel ids"))
+}
+
+fn normalize_jaw_coupling(
+    jaw_coupling: Option<JawCouplingConfig>,
+    channels: &[MotorChannel],
+) -> Result<Option<JawCouplingConfig>> {
+    let Some(jaw_coupling) = jaw_coupling else {
+        return Ok(None);
+    };
+
+    if jaw_coupling.master_motor_id >= channels.len() {
+        bail!(
+            "jaw coupling master motor {} out of range",
+            jaw_coupling.master_motor_id
+        );
+    }
+    if jaw_coupling.slave_motor_ids.is_empty() {
+        bail!("jaw coupling must define at least one slave motor");
+    }
+    if !jaw_coupling.ratio.is_finite() {
+        bail!("jaw coupling ratio must be finite");
+    }
+
+    for slave_motor_id in &jaw_coupling.slave_motor_ids {
+        if *slave_motor_id >= channels.len() {
+            bail!("jaw coupling slave motor {} out of range", slave_motor_id);
+        }
+        if *slave_motor_id == jaw_coupling.master_motor_id {
+            bail!("jaw coupling slave motor cannot equal master motor");
+        }
+    }
+
+    Ok(Some(jaw_coupling))
+}
+
+fn apply_motor_target(state: &mut InnerState, motor_id: usize, logical_value: f32) {
+    let channel = state.channels[motor_id].clone();
+    state.target_logical[motor_id] = channel.normalized_logical(logical_value);
+    state.target_applied[motor_id] = channel.logical_to_applied(logical_value);
+}
+
+fn apply_motor_target_with_applied(
+    state: &mut InnerState,
+    motor_id: usize,
+    logical_value: f32,
+    applied_value: f32,
+) {
+    let channel = state.channels[motor_id].clone();
+    state.target_logical[motor_id] = channel.normalized_logical(logical_value);
+    state.target_applied[motor_id] = applied_value.clamp(channel.min_applied, channel.max_applied);
+}
+
+fn maybe_apply_jaw_coupling(state: &mut InnerState, updated_motor_id: usize) {
+    let Some(jaw_coupling) = state.jaw_coupling.clone() else {
+        return;
+    };
+    if updated_motor_id != jaw_coupling.master_motor_id {
+        maybe_sync_jaw_slaves(state, updated_motor_id, &jaw_coupling);
+        return;
+    }
+    apply_jaw_coupling(state, &jaw_coupling);
+}
+
+fn maybe_apply_jaw_coupling_from_master(state: &mut InnerState) {
+    let Some(jaw_coupling) = state.jaw_coupling.clone() else {
+        return;
+    };
+    apply_jaw_coupling(state, &jaw_coupling);
+}
+
+fn apply_jaw_coupling(state: &mut InnerState, jaw_coupling: &JawCouplingConfig) {
+    let master_channel = state.channels[jaw_coupling.master_motor_id].clone();
+    let master_delta =
+        state.target_logical[jaw_coupling.master_motor_id] - master_channel.neutral_logical;
+    let shared_slave_delta = master_delta * jaw_coupling.ratio;
+
+    for slave_motor_id in &jaw_coupling.slave_motor_ids {
+        let direction = jaw_coupling
+            .directions
+            .get(slave_motor_id)
+            .copied()
+            .unwrap_or(1.0);
+        let slave_channel = state.channels[*slave_motor_id].clone();
+        let slave_logical = slave_channel.neutral_logical + shared_slave_delta;
+        let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
+        apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
+    }
+}
+
+fn maybe_sync_jaw_slaves(
+    state: &mut InnerState,
+    updated_motor_id: usize,
+    jaw_coupling: &JawCouplingConfig,
+) {
+    if !jaw_coupling.slave_motor_ids.contains(&updated_motor_id) {
+        return;
+    }
+
+    let source_logical = state.target_logical[updated_motor_id];
+    let source_channel = state.channels[updated_motor_id].clone();
+    let shared_slave_delta = source_logical - source_channel.neutral_logical;
+    for slave_motor_id in &jaw_coupling.slave_motor_ids {
+        let slave_channel = state.channels[*slave_motor_id].clone();
+        let direction = jaw_coupling
+            .directions
+            .get(slave_motor_id)
+            .copied()
+            .unwrap_or(1.0);
+        let slave_logical = slave_channel.neutral_logical + shared_slave_delta;
+        let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
+        apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
+    }
 }
 
 fn build_runtime_state(state: &InnerState) -> RuntimeState {

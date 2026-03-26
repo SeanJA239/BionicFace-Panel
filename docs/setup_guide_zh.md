@@ -2,7 +2,7 @@
 接下来你们实际使用时，建议固定成这条顺序：
 
 修改 config.py
-运行 python3 raspi/export_config_json.py
+运行 python raspi/export_config_json.py
 启动树莓派 servo_server.py
 启动 npm run tauri dev
 ## 0. 当前版本说明

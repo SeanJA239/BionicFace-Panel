@@ -90,35 +90,35 @@ MOTOR_MAP = {
 }
 
 MOTOR_LIMITS = {
-    0: (170, 210),  # 90-zero
-    1: (10, 40),  # 90-zero
-    2: (170, 210),  # 90-zero
-    3: (10, 40),  # 90-zero
-    4: (0, 180),  # 90-zero tendon
-    5: (0, 180),  # 90-zero tendon
-    6: (0, 180),  # 90-zero tendon
-    7: (0, 180),  # 90-zero tendon
-    8: (0, 180),  # 90-zero
+    0: (40, 100),  # 90-zero
+    1: (80, 120),  # 90-zero
+    2: (75, 105),  # 90-zero
+    3: (50, 80),  # 90-zero
+    4: (75, 105),  # 90-zero tendon
+    5: (75, 105),  # 90-zero tendon
+    6: (75, 105),  # 90-zero tendon
+    7: (75, 105),  # 90-zero tendon
+    8: (45, 135),  # 90-zero
     9: (60, 135),
-    10: (60, 135),
+    10: (60, 175),
     11: (60, 135),
-    12: (60, 135),
-    13: (90, 120),
-    14: (75, 105),  # 90-mid
-    15: (90, 120),  # 90-zero
-    16: (75, 105),  # 90-mid
-    17: (30, 50),  # 90-mid
+    12: (20, 135),
+    13: (30, 135),
+    14: (45, 105),  # 90-mid
+    15: (90, 150),  # 90-zero
+    16: (75, 135),  # 90-mid
+    17: (0, 50),  # 90-mid
     18: (90, 130),  # 90-mid
-    19: (30, 50),  # 90-mid
+    19: (30, 80),  # 90-mid
     20: (90, 130),  # 90-mid
-    21: (80, 90),  # 90-rand
-    22: (90, 100),  # 90-rand
-    23: (85, 95),  # 90-mid
+    21: (80, 120),  # 90-rand
+    22: (90, 130),  # 90-rand
+    23: (45, 125),  # 90-mid
     24: (60, 120),  # 90-zero-r
-    25: (0, 180),
-    26: (0, 180),
-    27: (0, 180),
-    28: (255, 285),  # 90-mid-r
+    25: (75, 110),
+    26: (60, 100),
+    27: (95, 135),
+    28: (75, 105),  # 90-mid-r
     29: (75, 105),
     30: (0, 180),
     31: (0, 180),
@@ -134,4 +134,58 @@ MOTOR_OFFSET = {
     21: 3,
     22: 3,
     24: 10,
+}
+
+# Explicit startup / neutral servo angles in applied servo degrees.
+MOTOR_INITIAL_APPLIED = {
+    0: 85.0,
+    1: 100.0,
+    2: 100.0,
+    3: 78.0,
+    4: 82.5,
+    5: 90.0,
+    6: 90.0,
+    7: 90.0,
+    8: 90.0,
+    9: 69.0,
+    10: 97.5,
+    11: 118.0,
+    12: 97.5,
+    13: 105.0,
+    14: 90.0,
+    15: 105.0,
+    16: 90.0,
+    17: 40.0,
+    18: 110.0,
+    19: 40.0,
+    20: 110.0,
+    21: 85.0,
+    22: 90.0,
+    23: 85.0,
+    24: 89.5,
+    25: 79.0,
+    26: 63.0,
+    27: 117.0,
+    28: 79.5,
+    29: 79.0,
+    30: 90.0,
+    31: 90.0,
+}
+
+# Optional jaw linkage compensation.
+# The control layer treats motor 25 as the master lift axis. When motor 25 moves
+# away from its neutral position, motors 26 and 27 receive proportional
+# compensation relative to their own neutral positions.
+#
+# `ratio` is the absolute compensation scale against the master motor delta.
+# `direction` controls whether each slave follows (+1) or opposes (-1) the
+# master's positive rotation.
+JAW_COUPLING = {
+    "master_motor_id": 25,
+    "slave_motor_ids": [26, 27],
+    "ratio": 1.0,
+    "directions": {
+        26: 1.0,
+        27: -1.0,
+    },
 }

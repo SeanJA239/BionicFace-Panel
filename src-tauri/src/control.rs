@@ -59,6 +59,7 @@ struct ConfigFile {
     transport: TransportConfig,
     channels: Vec<MotorChannel>,
     jaw_coupling: Option<JawCouplingConfig>,
+    expression_presets: Vec<ExpressionPreset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +77,21 @@ struct JawCouplingConfig {
     slave_motor_ids: Vec<usize>,
     ratio: f32,
     directions: BTreeMap<usize, f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionPreset {
+    pub id: String,
+    pub label: String,
+    pub angles: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionPresetSummary {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +209,7 @@ struct InnerState {
     frame_seq: u64,
     channels: Vec<MotorChannel>,
     jaw_coupling: Option<JawCouplingConfig>,
+    expression_presets: Vec<ExpressionPreset>,
     endpoint: Option<SocketAddr>,
     target_logical: Vec<f32>,
     target_applied: Vec<f32>,
@@ -211,6 +228,7 @@ impl ControlService {
         let config = load_config(&app_dir)?;
         let channels = normalize_channels(config.channels)?;
         let jaw_coupling = normalize_jaw_coupling(config.jaw_coupling, &channels)?;
+        let expression_presets = normalize_expression_presets(config.expression_presets)?;
 
         let target_logical = channels
             .iter()
@@ -229,6 +247,7 @@ impl ControlService {
             frame_seq: 0,
             channels,
             jaw_coupling,
+            expression_presets,
             endpoint: None,
             target_logical,
             target_applied,
@@ -275,6 +294,17 @@ impl ControlService {
         state.channels.clone()
     }
 
+    pub async fn expression_presets(&self) -> Vec<ExpressionPresetSummary> {
+        let state = self.state.lock().await;
+        state.expression_presets
+            .iter()
+            .map(|preset| ExpressionPresetSummary {
+                id: preset.id.clone(),
+                label: preset.label.clone(),
+            })
+            .collect()
+    }
+
     pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         if update.motor_id >= MOTOR_COUNT {
@@ -306,6 +336,25 @@ impl ControlService {
             state.target_applied[index] = channel.neutral_applied;
         }
         build_runtime_state(&state)
+    }
+
+    pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
+        let mut state = self.state.lock().await;
+        let preset = state
+            .expression_presets
+            .iter()
+            .find(|preset| preset.id == preset_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("expression preset not found: {preset_id}"))?;
+
+        for (motor_id, applied_value) in preset.angles.iter().copied().enumerate() {
+            let channel = state.channels[motor_id].clone();
+            let applied_value = applied_value.clamp(channel.min_applied, channel.max_applied);
+            let logical_value = channel.normalized_logical(applied_value - channel.offset);
+            apply_motor_target_with_applied(&mut state, motor_id, logical_value, applied_value);
+        }
+
+        Ok(build_runtime_state(&state))
     }
 
     pub async fn runtime_state(&self) -> RuntimeState {
@@ -366,6 +415,10 @@ impl AppState {
         self.service.channels().await
     }
 
+    pub async fn expression_presets(&self) -> Vec<ExpressionPresetSummary> {
+        self.service.expression_presets().await
+    }
+
     pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
         self.service.set_motor_target(update).await
     }
@@ -376,6 +429,10 @@ impl AppState {
 
     pub async fn center_all(&self) -> RuntimeState {
         self.service.center_all().await
+    }
+
+    pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
+        self.service.apply_expression_preset(preset_id).await
     }
 
     pub async fn runtime_state(&self) -> RuntimeState {
@@ -460,6 +517,33 @@ fn normalize_jaw_coupling(
     }
 
     Ok(Some(jaw_coupling))
+}
+
+fn normalize_expression_presets(
+    expression_presets: Vec<ExpressionPreset>,
+) -> Result<Vec<ExpressionPreset>> {
+    let mut ids = std::collections::BTreeSet::new();
+
+    for preset in &expression_presets {
+        if preset.id.trim().is_empty() {
+            bail!("expression preset id cannot be empty");
+        }
+        if preset.label.trim().is_empty() {
+            bail!("expression preset label cannot be empty");
+        }
+        if preset.angles.len() != MOTOR_COUNT {
+            bail!(
+                "expression preset '{}' must contain exactly {} angles",
+                preset.id,
+                MOTOR_COUNT
+            );
+        }
+        if !ids.insert(preset.id.clone()) {
+            bail!("duplicate expression preset id '{}'", preset.id);
+        }
+    }
+
+    Ok(expression_presets)
 }
 
 fn apply_motor_target(state: &mut InnerState, motor_id: usize, logical_value: f32) {

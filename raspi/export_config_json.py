@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "raspi" / "config.py"
 OUTPUT_PATH = ROOT / "src-tauri" / "config" / "motor_config.json"
+EMOTION_PATH = ROOT / "emotion.md"
 
 
 def load_module(path: Path):
@@ -79,6 +81,38 @@ def build_jaw_coupling(module) -> dict | None:
     }
 
 
+def parse_expression_presets(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+
+    raw = path.read_text(encoding="utf-8")
+    matches = list(re.finditer(r"^\s*(.+?)\s*[:：]\s*$", raw, re.MULTILINE))
+    presets: list[dict] = []
+
+    for index, match in enumerate(matches):
+        label = match.group(1).strip()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        block = raw[start:end]
+        numbers = [
+            float(value)
+            for value in re.findall(r"-?\d+(?:\.\d+)?", block)
+        ]
+        if len(numbers) != 32:
+            raise RuntimeError(
+                f"Expression preset '{label}' must contain exactly 32 angles, got {len(numbers)}"
+            )
+        presets.append(
+            {
+                "id": label,
+                "label": label,
+                "angles": numbers,
+            }
+        )
+
+    return presets
+
+
 def main() -> None:
     module = load_module(CONFIG_PATH)
     if len(module.MOTOR_MAP) != 32:
@@ -93,6 +127,7 @@ def main() -> None:
         },
         "channels": channels,
         "jawCoupling": build_jaw_coupling(module),
+        "expressionPresets": parse_expression_presets(EMOTION_PATH),
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

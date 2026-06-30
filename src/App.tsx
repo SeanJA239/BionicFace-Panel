@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  applyExpressionPreset,
   centerAll,
   connectPi,
   disconnectPi,
@@ -8,7 +9,9 @@ import {
   getMotorChannels,
   getRuntimeState,
   getTransportStatus,
+  listExpressionPresets,
   setMotorTarget,
+  type ExpressionPresetSummary,
   type MotorChannel,
   type RuntimeState,
   type UdpControlFrame,
@@ -32,21 +35,25 @@ function App() {
   const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT);
   const [channels, setChannels] = useState<MotorChannel[]>([]);
   const [runtime, setRuntime] = useState<RuntimeState>(fallbackRuntime);
+  const [expressionPresets, setExpressionPresets] = useState<ExpressionPresetSummary[]>([]);
   const [lastFrame, setLastFrame] = useState<UdpControlFrame | null>(null);
   const [status, setStatus] = useState("Loading config...");
   const [connected, setConnected] = useState(false);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
 
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [motorChannels, runtimeState, transportStatus] = await Promise.all([
+        const [motorChannels, runtimeState, transportStatus, presets] = await Promise.all([
           getMotorChannels(),
           getRuntimeState(),
           getTransportStatus(),
+          listExpressionPresets(),
         ]);
         setChannels(motorChannels);
         setRuntime(runtimeState);
         setConnected(transportStatus.connected);
+        setExpressionPresets(presets);
         if (transportStatus.endpoint) {
           setEndpoint(transportStatus.endpoint);
         }
@@ -91,6 +98,7 @@ function App() {
     try {
       const next = await centerAll();
       setRuntime(next);
+      setActivePresetId(null);
       setStatus("All motor targets reset to neutral");
     } catch (error) {
       setStatus(String(error));
@@ -108,6 +116,7 @@ function App() {
   }
 
   async function handleSliderChange(motorId: number, value: number) {
+    setActivePresetId(null);
     setRuntime((current) => {
       const next = { ...current, targetLogical: [...current.targetLogical] };
       next.targetLogical[motorId] = value;
@@ -117,6 +126,17 @@ function App() {
     try {
       const next = await setMotorTarget(motorId, value);
       setRuntime(next);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function handleApplyPreset(preset: ExpressionPresetSummary) {
+    try {
+      const next = await applyExpressionPreset(preset.id);
+      setRuntime(next);
+      setActivePresetId(preset.id);
+      setStatus(`Expression preset applied: ${preset.label}`);
     } catch (error) {
       setStatus(String(error));
     }
@@ -151,6 +171,19 @@ function App() {
               Flush
             </button>
           </div>
+          {expressionPresets.length > 0 ? (
+            <div className="button-row">
+              {expressionPresets.map((preset) => (
+                <button
+                  className={activePresetId === preset.id ? "" : "secondary"}
+                  key={preset.id}
+                  onClick={() => handleApplyPreset(preset)}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
           <p className="status-line muted">{status}</p>
         </div>

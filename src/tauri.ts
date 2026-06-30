@@ -39,6 +39,11 @@ export type UdpControlFrame = {
   angles: number[];
 };
 
+export type ExpressionPresetSummary = {
+  id: string;
+  label: string;
+};
+
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 async function safeInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -64,6 +69,10 @@ export async function getMotorChannels(): Promise<MotorChannel[]> {
   return safeInvoke("get_motor_channels");
 }
 
+export async function listExpressionPresets(): Promise<ExpressionPresetSummary[]> {
+  return safeInvoke("list_expression_presets");
+}
+
 export async function setMotorTarget(motorId: number, logicalValue: number): Promise<RuntimeState> {
   return safeInvoke("set_motor_target", { motorId, logicalValue });
 }
@@ -74,6 +83,10 @@ export async function setAllTargets(logicalValues: number[]): Promise<RuntimeSta
 
 export async function centerAll(): Promise<RuntimeState> {
   return safeInvoke("center_all");
+}
+
+export async function applyExpressionPreset(presetId: string): Promise<RuntimeState> {
+  return safeInvoke("apply_expression_preset", { presetId });
 }
 
 export async function getRuntimeState(): Promise<RuntimeState> {

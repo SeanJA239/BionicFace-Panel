@@ -46,9 +46,9 @@ MOTOR_NAMES = {
     31: "neck_right",
 }
 
-# Neck channels remain in the 32-channel protocol, but are temporarily excluded
-# from data collection while the neck structure is under active redesign.
-DISABLED_MOTORS = [30, 31]
+# Channels listed here stay in the 32-channel protocol but are held at their
+# neutral position and hidden from calibration input.
+DISABLED_MOTORS = []
 
 MOTOR_MAP = {
     # eyebrow_rigid

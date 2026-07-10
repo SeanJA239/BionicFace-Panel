@@ -471,7 +471,7 @@
       "maxLogical": 180.0,
       "neutralApplied": 90.0,
       "neutralLogical": 90.0,
-      "enabled": false
+      "enabled": true
     },
     {
       "id": 31,
@@ -486,7 +486,7 @@
       "maxLogical": 180.0,
       "neutralApplied": 90.0,
       "neutralLogical": 90.0,
-      "enabled": false
+      "enabled": true
     }
   ]
 }

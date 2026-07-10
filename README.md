@@ -103,7 +103,6 @@ Rust -> UDP JSON -> Raspberry Pi
 {
   "frameId": 123,
   "timestampNs": 1742600000000000000,
-  "timestampRfc3339": "2026-03-21T12:00:00.000000Z",
   "source": "udp-heartbeat",
   "angles": [32 个最终角度]
 }
@@ -113,7 +112,14 @@ Rust -> UDP JSON -> Raspberry Pi
 
 - `frameId`：帧编号
 - `timestampNs`：高精度时间戳
+- `source`：`udp-heartbeat`（运动中）、`udp-keepalive`（静止保活）或 `manual-flush`
 - `angles`：最终发往 PCA9685 的 32 通道物理角度
+
+发送节奏：
+
+- 有通道在向目标插值时按 100Hz 全速发送并记录日志
+- 所有通道到位后降为 10Hz 保活帧，保活帧不写日志
+- RFC3339 时间戳只保留在本地日志（JSONL/CSV）里，不进 UDP 协议
 
 ## 配置机制
 

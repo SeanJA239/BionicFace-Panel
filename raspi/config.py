@@ -176,16 +176,14 @@ MOTOR_INITIAL_APPLIED = {
     31: 90.0,
 }
 
-# Optional jaw linkage compensation.
-# DISABLED per lab request: motors 25, 26, 27 now move independently.
-# To restore, set JAW_COUPLING back to the dict kept below.
-JAW_COUPLING = None
-# JAW_COUPLING = {
-#     "master_motor_id": 25,
-#     "slave_motor_ids": [26, 27],
-#     "ratio": 1.0,
-#     "directions": {
-#         26: 1.0,
-#         27: -1.0,
-#     },
-# }
+# Jaw linkage compensation.
+# Motor 25 is independent. Only 26 and 27 are bound as a mirror pair: 26 is the
+# master, 27 follows it in the opposite direction (they are physically mirrored).
+JAW_COUPLING = {
+    "master_motor_id": 26,
+    "slave_motor_ids": [27],
+    "ratio": 1.0,
+    "directions": {
+        27: -1.0,
+    },
+}

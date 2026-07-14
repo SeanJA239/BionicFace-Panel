@@ -31,7 +31,7 @@ def build_channel(module, motor_id: int) -> dict:
     offsets = getattr(module, "MOTOR_OFFSET", {})
     initial_applied = getattr(module, "MOTOR_INITIAL_APPLIED", {})
     names = getattr(module, "MOTOR_NAMES", {})
-    disabled_motors = set(getattr(module, "DISABLED_MOTORS", [30, 31]))
+    disabled_motors = set(getattr(module, "DISABLED_MOTORS", []))
     board_addresses = list(getattr(module, "BOARD_ADDRESSES", [0x40, 0x41]))
 
     board, channel = motor_map[motor_id]

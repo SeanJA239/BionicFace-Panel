@@ -27,7 +27,7 @@ function fallbackRuntime(): RuntimeState {
   return {
     endpoint: null,
     heartbeatHz: 100,
-    disabledMotorIds: [30, 31],
+    disabledMotorIds: [],
     targetLogical: Array(MOTOR_COUNT).fill(0),
     targetApplied: Array(MOTOR_COUNT).fill(0),
     currentApplied: Array(MOTOR_COUNT).fill(0),
@@ -57,7 +57,7 @@ const SliderRow = memo(function SliderRow({
           board {channel.board} / ch {channel.channel} / offset {channel.offset.toFixed(1)}
         </span>
         {!channel.enabled ? (
-          <span className="channel-badge">disabled for current neck redesign</span>
+          <span className="channel-badge">disabled in config</span>
         ) : null}
       </div>
       <input

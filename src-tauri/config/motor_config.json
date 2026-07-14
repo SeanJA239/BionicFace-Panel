@@ -464,14 +464,14 @@
       "board": 0,
       "channel": 14,
       "boardAddress": 64,
-      "minApplied": 0.0,
-      "maxApplied": 180.0,
+      "minApplied": 75.0,
+      "maxApplied": 105.0,
       "offset": 0.0,
-      "minLogical": 0.0,
-      "maxLogical": 180.0,
+      "minLogical": 75.0,
+      "maxLogical": 105.0,
       "neutralApplied": 90.0,
       "neutralLogical": 90.0,
-      "enabled": false
+      "enabled": true
     },
     {
       "id": 31,
@@ -479,14 +479,14 @@
       "board": 0,
       "channel": 15,
       "boardAddress": 64,
-      "minApplied": 0.0,
-      "maxApplied": 180.0,
+      "minApplied": 75.0,
+      "maxApplied": 105.0,
       "offset": 0.0,
-      "minLogical": 0.0,
-      "maxLogical": 180.0,
+      "minLogical": 75.0,
+      "maxLogical": 105.0,
       "neutralApplied": 90.0,
       "neutralLogical": 90.0,
-      "enabled": false
+      "enabled": true
     }
   ],
   "jawCoupling": {

@@ -46,9 +46,9 @@ MOTOR_NAMES = {
     31: "neck_right",
 }
 
-# Neck channels remain in the 32-channel protocol, but are temporarily excluded
-# from data collection while the neck structure is under active redesign.
-DISABLED_MOTORS = [30, 31]
+# Channels listed here stay in the 32-channel protocol but are held at their
+# neutral position and hidden from calibration input.
+DISABLED_MOTORS = []
 
 MOTOR_MAP = {
     # eyebrow_rigid
@@ -120,8 +120,11 @@ MOTOR_LIMITS = {
     27: (95, 135),
     28: (75, 105),  # 90-mid-r
     29: (75, 105),
-    30: (0, 180),
-    31: (0, 180),
+    # Neck structure is back in service but not yet calibrated end-to-end;
+    # keep 30/31 within +/-15 deg of their 90 deg midpoint until a proper
+    # range-of-motion pass is done.
+    30: (75, 105),
+    31: (75, 105),
 }
 
 MOTOR_OFFSET = {

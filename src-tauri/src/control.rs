@@ -14,6 +14,10 @@ use tracing::{info, warn};
 
 const MOTOR_COUNT: usize = 32;
 const HEARTBEAT_HZ: u64 = 100;
+// When all channels are settled the PCA9685 holds its PWM output, so frames
+// are only resent as a low-rate keepalive instead of at the full tick rate.
+const KEEPALIVE_TICK_DIVISOR: u64 = 10;
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_STEP_PER_TICK_DEG: f32 = 2.0;
 const CONFIG_PATH: &str = "config/motor_config.json";
 
@@ -115,6 +119,26 @@ pub struct UdpControlFrame {
     pub angles: Vec<f32>,
 }
 
+// On-wire view of a frame: the RFC3339 timestamp only exists for humans
+// reading logs, so it stays out of the UDP payload.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireFrame<'a> {
+    frame_id: u64,
+    timestamp_ns: u128,
+    source: &'a str,
+    angles: &'a [f32],
+}
+
+fn encode_wire(frame: &UdpControlFrame) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&WireFrame {
+        frame_id: frame.frame_id,
+        timestamp_ns: frame.timestamp_ns,
+        source: &frame.source,
+        angles: &frame.angles,
+    })?)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportStatus {
@@ -168,7 +192,6 @@ impl FrameLogger {
             let mut writer = self.jsonl.lock().await;
             writer.write_all(&encoded)?;
             writer.write_all(b"\n")?;
-            writer.flush()?;
         }
 
         {
@@ -180,9 +203,14 @@ impl FrameLogger {
             row.push(frame.source.clone());
             row.extend(frame.angles.iter().map(|value| format!("{value:.4}")));
             csv_writer.write_record(row)?;
-            csv_writer.flush()?;
         }
 
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.jsonl.lock().await.flush()?;
+        self.csv.lock().await.flush()?;
         Ok(())
     }
 }
@@ -220,11 +248,15 @@ struct InnerState {
 pub struct ControlService {
     logger: Arc<FrameLogger>,
     state: Arc<Mutex<InnerState>>,
+    socket: Arc<UdpSocket>,
 }
 
 impl ControlService {
     pub async fn new(log_dir: PathBuf, app_dir: PathBuf) -> Result<Self> {
         let logger = Arc::new(FrameLogger::new(&log_dir).await?);
+        let socket = Arc::new(
+            UdpSocket::bind("0.0.0.0:0").context("failed to bind UDP socket for control frames")?,
+        );
         let config = load_config(&app_dir)?;
         let channels = normalize_channels(config.channels)?;
         let jaw_coupling = normalize_jaw_coupling(config.jaw_coupling, &channels)?;
@@ -255,9 +287,13 @@ impl ControlService {
             last_frame: None,
         }));
 
-        spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger));
+        spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger), Arc::clone(&socket));
 
-        Ok(Self { logger, state })
+        Ok(Self {
+            logger,
+            state,
+            socket,
+        })
     }
 
     pub async fn connect(&self, endpoint: String) -> Result<TransportStatus> {
@@ -368,24 +404,24 @@ impl ControlService {
     }
 
     pub async fn flush_current_frame(&self) -> Result<Option<UdpControlFrame>> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         let endpoint = match state.endpoint {
             Some(endpoint) => endpoint,
             None => return Ok(None),
         };
+        state.frame_seq += 1;
         let frame = build_frame(
-            state.frame_seq + 1,
+            state.frame_seq,
             "manual-flush".to_string(),
             state.current_applied.clone(),
         )?;
+        state.last_frame = Some(frame.clone());
         drop(state);
 
-        send_frame(endpoint, &frame)?;
+        let payload = encode_wire(&frame)?;
+        self.socket.send_to(&payload, endpoint)?;
         self.logger.append(&frame).await?;
-
-        let mut state = self.state.lock().await;
-        state.frame_seq = frame.frame_id;
-        state.last_frame = Some(frame.clone());
+        self.logger.flush().await?;
         Ok(Some(frame))
     }
 }
@@ -666,74 +702,94 @@ fn step_towards(current: f32, target: f32) -> f32 {
     }
 }
 
-fn spawn_udp_heartbeat(state: Arc<Mutex<InnerState>>, logger: Arc<FrameLogger>) {
+fn spawn_udp_heartbeat(
+    state: Arc<Mutex<InnerState>>,
+    logger: Arc<FrameLogger>,
+    socket: Arc<UdpSocket>,
+) {
     tauri::async_runtime::spawn(async move {
-        let socket = match UdpSocket::bind("0.0.0.0:0") {
-            Ok(socket) => socket,
-            Err(error) => {
-                warn!("failed to bind UDP socket for heartbeat: {error}");
-                return;
-            }
-        };
-
         let mut ticker = tokio::time::interval(Duration::from_millis(1000 / HEARTBEAT_HZ));
+        let mut tick: u64 = 0;
+        let mut was_moving = false;
+        let mut log_dirty = false;
+        let mut last_flush = tokio::time::Instant::now();
+
         loop {
             ticker.tick().await;
+            tick = tick.wrapping_add(1);
 
+            let mut moving = false;
             let maybe_frame = {
                 let mut state = state.lock().await;
+                let state = &mut *state;
                 if let Some(endpoint) = state.endpoint {
                     for index in 0..MOTOR_COUNT {
-                        state.current_applied[index] =
-                            step_towards(state.current_applied[index], state.target_applied[index]);
+                        let current = state.current_applied[index];
+                        let target = state.target_applied[index];
+                        if current != target {
+                            moving = true;
+                            state.current_applied[index] = step_towards(current, target);
+                        }
                     }
 
-                    state.frame_seq += 1;
-                    let frame = match build_frame(
-                        state.frame_seq,
-                        "udp-heartbeat".to_string(),
-                        state.current_applied.clone(),
-                    ) {
-                        Ok(frame) => frame,
-                        Err(error) => {
-                            warn!("failed to build UDP frame: {error}");
-                            continue;
+                    if moving || tick % KEEPALIVE_TICK_DIVISOR == 0 {
+                        state.frame_seq += 1;
+                        let source = if moving {
+                            "udp-heartbeat"
+                        } else {
+                            "udp-keepalive"
+                        };
+                        match build_frame(
+                            state.frame_seq,
+                            source.to_string(),
+                            state.current_applied.clone(),
+                        ) {
+                            Ok(frame) => {
+                                state.last_frame = Some(frame.clone());
+                                Some((endpoint, frame))
+                            }
+                            Err(error) => {
+                                warn!("failed to build UDP frame: {error}");
+                                None
+                            }
                         }
-                    };
-                    state.last_frame = Some(frame.clone());
-                    Some((endpoint, frame))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             };
 
-            let Some((endpoint, frame)) = maybe_frame else {
-                continue;
-            };
-
-            let payload = match serde_json::to_vec(&frame) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    warn!("failed to encode UDP frame: {error}");
-                    continue;
+            if let Some((endpoint, frame)) = maybe_frame {
+                match encode_wire(&frame) {
+                    Ok(payload) => {
+                        if let Err(error) = socket.send_to(&payload, endpoint) {
+                            warn!("failed to send UDP frame to {endpoint}: {error}");
+                        }
+                    }
+                    Err(error) => warn!("failed to encode UDP frame: {error}"),
                 }
-            };
 
-            if let Err(error) = socket.send_to(&payload, endpoint) {
-                warn!("failed to send UDP frame to {endpoint}: {error}");
-                continue;
+                // Keepalive frames repeat unchanged angles, so only motion
+                // frames go to the log.
+                if moving {
+                    if let Err(error) = logger.append(&frame).await {
+                        warn!("failed to append UDP frame log: {error}");
+                    }
+                    log_dirty = true;
+                }
             }
 
-            if let Err(error) = logger.append(&frame).await {
-                warn!("failed to append UDP frame log: {error}");
+            let settled = was_moving && !moving;
+            if log_dirty && (settled || last_flush.elapsed() >= LOG_FLUSH_INTERVAL) {
+                if let Err(error) = logger.flush().await {
+                    warn!("failed to flush UDP frame log: {error}");
+                }
+                log_dirty = false;
+                last_flush = tokio::time::Instant::now();
             }
+            was_moving = moving;
         }
     });
-}
-
-fn send_frame(endpoint: SocketAddr, frame: &UdpControlFrame) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    let payload = serde_json::to_vec(frame)?;
-    socket.send_to(&payload, endpoint)?;
-    Ok(())
 }

@@ -46,10 +46,34 @@ def build_kits(module) -> dict[int, ServoKit]:
     return kits
 
 
-def apply_angles(kits: dict[int, ServoKit], motor_map: dict[int, tuple[int, int]], angles: list[float]) -> None:
+def apply_angles(
+    kits: dict[int, ServoKit],
+    motor_map: dict[int, tuple[int, int]],
+    angles: list[float],
+    last_angles: list[float | None],
+) -> None:
+    # Each .angle assignment is several I2C register writes; skipping
+    # unchanged channels keeps the bus from saturating at high frame rates.
     for motor_id, angle in enumerate(angles):
+        if last_angles[motor_id] == angle:
+            continue
         board, channel = motor_map[motor_id]
         kits[board].servo[channel].angle = angle
+        last_angles[motor_id] = angle
+
+
+def drain_to_latest(server: socket.socket, packet: bytes) -> bytes:
+    # I2C writes are slower than the incoming frame rate can be; only the
+    # newest queued frame matters, older ones are stale targets.
+    server.setblocking(False)
+    try:
+        while True:
+            packet, _addr = server.recvfrom(65535)
+    except BlockingIOError:
+        pass
+    finally:
+        server.settimeout(0.2)
+    return packet
 
 
 def main() -> None:
@@ -74,18 +98,22 @@ def main() -> None:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    last_angles: list[float | None] = [None] * 32
+
     while not stop:
         try:
             packet, _addr = server.recvfrom(65535)
         except socket.timeout:
             continue
 
+        packet = drain_to_latest(server, packet)
+
         try:
             payload = json.loads(packet.decode("utf-8"))
             angles = payload["angles"]
             if len(angles) != 32:
                 continue
-            apply_angles(kits, motor_map, angles)
+            apply_angles(kits, motor_map, angles, last_angles)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Skipping invalid packet: %s", exc)
 

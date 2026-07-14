@@ -17,7 +17,7 @@ import {
   type UdpControlFrame,
 } from "./tauri";
 
-const DEFAULT_ENDPOINT = "192.168.137.93:6000";
+const DEFAULT_ENDPOINT = "192.168.1.101:6000";
 const MOTOR_COUNT = 32;
 // Slider drags fire change events far faster than the IPC round-trip is
 // worth; pending values are coalesced and sent at most ~30 times per second.

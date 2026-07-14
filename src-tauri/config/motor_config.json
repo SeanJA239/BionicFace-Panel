@@ -405,10 +405,10 @@
       "channel": 12,
       "boardAddress": 65,
       "minApplied": 60.0,
-      "maxApplied": 100.0,
+      "maxApplied": 135.0,
       "offset": 0.0,
       "minLogical": 60.0,
-      "maxLogical": 100.0,
+      "maxLogical": 135.0,
       "neutralApplied": 94.0,
       "neutralLogical": 94.0,
       "enabled": true

@@ -180,12 +180,12 @@
       "channel": 7,
       "boardAddress": 64,
       "minApplied": 60.0,
-      "maxApplied": 150.0,
+      "maxApplied": 110.0,
       "offset": 0.0,
       "minLogical": 60.0,
-      "maxLogical": 150.0,
-      "neutralApplied": 118.0,
-      "neutralLogical": 118.0,
+      "maxLogical": 110.0,
+      "neutralApplied": 110.0,
+      "neutralLogical": 110.0,
       "enabled": true
     },
     {
@@ -441,7 +441,7 @@
       "maxLogical": 105.0,
       "neutralApplied": 79.5,
       "neutralLogical": 79.5,
-      "enabled": true
+      "enabled": false
     },
     {
       "id": 29,
@@ -456,7 +456,7 @@
       "maxLogical": 105.0,
       "neutralApplied": 79.0,
       "neutralLogical": 79.0,
-      "enabled": true
+      "enabled": false
     },
     {
       "id": 30,

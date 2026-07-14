@@ -48,7 +48,8 @@ MOTOR_NAMES = {
 
 # Channels listed here stay in the 32-channel protocol but are held at their
 # neutral position and hidden from calibration input.
-DISABLED_MOTORS = []
+# 28/29 (tongue) disabled for now per lab request.
+DISABLED_MOTORS = [28, 29]
 
 MOTOR_MAP = {
     # eyebrow_rigid
@@ -101,7 +102,7 @@ MOTOR_LIMITS = {
     8: (45, 135),  # 90-zero
     9: (35, 135),
     10: (60, 175),
-    11: (60, 150),
+    11: (60, 110),
     12: (0, 135),
     13: (30, 135),
     14: (45, 105),  # 90-mid

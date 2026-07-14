@@ -19,8 +19,8 @@
       "offset": 3.0,
       "minLogical": 37.0,
       "maxLogical": 97.0,
-      "neutralApplied": 85.0,
-      "neutralLogical": 82.0,
+      "neutralApplied": 100.0,
+      "neutralLogical": 97.0,
       "enabled": true
     },
     {
@@ -34,8 +34,8 @@
       "offset": 3.0,
       "minLogical": 77.0,
       "maxLogical": 117.0,
-      "neutralApplied": 100.0,
-      "neutralLogical": 97.0,
+      "neutralApplied": 105.0,
+      "neutralLogical": 102.0,
       "enabled": true
     },
     {
@@ -49,8 +49,8 @@
       "offset": 3.0,
       "minLogical": 72.0,
       "maxLogical": 127.0,
-      "neutralApplied": 100.0,
-      "neutralLogical": 97.0,
+      "neutralApplied": 85.0,
+      "neutralLogical": 82.0,
       "enabled": true
     },
     {
@@ -64,8 +64,8 @@
       "offset": 3.0,
       "minLogical": 47.0,
       "maxLogical": 77.0,
-      "neutralApplied": 78.0,
-      "neutralLogical": 75.0,
+      "neutralApplied": 62.0,
+      "neutralLogical": 59.0,
       "enabled": true
     },
     {
@@ -154,8 +154,8 @@
       "offset": 0.0,
       "minLogical": 35.0,
       "maxLogical": 135.0,
-      "neutralApplied": 69.0,
-      "neutralLogical": 69.0,
+      "neutralApplied": 118.0,
+      "neutralLogical": 118.0,
       "enabled": true
     },
     {
@@ -169,8 +169,8 @@
       "offset": 0.0,
       "minLogical": 60.0,
       "maxLogical": 175.0,
-      "neutralApplied": 97.5,
-      "neutralLogical": 97.5,
+      "neutralApplied": 108.5,
+      "neutralLogical": 108.5,
       "enabled": true
     },
     {
@@ -184,8 +184,8 @@
       "offset": 0.0,
       "minLogical": 60.0,
       "maxLogical": 110.0,
-      "neutralApplied": 110.0,
-      "neutralLogical": 110.0,
+      "neutralApplied": 89.0,
+      "neutralLogical": 89.0,
       "enabled": true
     },
     {
@@ -259,8 +259,8 @@
       "offset": 0.0,
       "minLogical": 75.0,
       "maxLogical": 135.0,
-      "neutralApplied": 90.0,
-      "neutralLogical": 90.0,
+      "neutralApplied": 88.0,
+      "neutralLogical": 88.0,
       "enabled": true
     },
     {
@@ -394,8 +394,8 @@
       "offset": 0.0,
       "minLogical": 75.0,
       "maxLogical": 110.0,
-      "neutralApplied": 79.0,
-      "neutralLogical": 79.0,
+      "neutralApplied": 110.0,
+      "neutralLogical": 110.0,
       "enabled": true
     },
     {
@@ -409,8 +409,8 @@
       "offset": 0.0,
       "minLogical": 60.0,
       "maxLogical": 100.0,
-      "neutralApplied": 63.0,
-      "neutralLogical": 63.0,
+      "neutralApplied": 94.0,
+      "neutralLogical": 94.0,
       "enabled": true
     },
     {
@@ -424,8 +424,8 @@
       "offset": 0.0,
       "minLogical": 95.0,
       "maxLogical": 135.0,
-      "neutralApplied": 117.0,
-      "neutralLogical": 117.0,
+      "neutralApplied": 95.0,
+      "neutralLogical": 95.0,
       "enabled": true
     },
     {

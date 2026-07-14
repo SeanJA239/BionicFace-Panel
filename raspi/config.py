@@ -95,10 +95,10 @@ MOTOR_LIMITS = {
     1: (80, 120),  # 90-zero
     2: (75, 150),  # 90-zero
     3: (40, 80),  # 90-zero
-    4: (75, 105),  # 90-zero tendon
+    4: (45, 105),  # 90-zero tendon
     5: (75, 105),  # 90-zero tendon
     6: (75, 105),  # 90-zero tendon
-    7: (75, 105),  # 90-zero tendon
+    7: (75, 135),  # 90-zero tendon
     8: (75, 135),  # 90-zero
     9: (35, 135),
     10: (60, 175),
@@ -110,7 +110,7 @@ MOTOR_LIMITS = {
     16: (75, 135),  # 90-mid
     17: (0, 80),  # 90-mid
     18: (90, 130),  # 90-mid
-    19: (70, 150),  # 90-mid
+    19: (70, 170),  # 90-mid
     20: (90, 130),  # 90-mid
     21: (80, 120),  # 90-rand
     22: (90, 130),  # 90-rand
@@ -177,19 +177,15 @@ MOTOR_INITIAL_APPLIED = {
 }
 
 # Optional jaw linkage compensation.
-# The control layer treats motor 25 as the master lift axis. When motor 25 moves
-# away from its neutral position, motors 26 and 27 receive proportional
-# compensation relative to their own neutral positions.
-#
-# `ratio` is the absolute compensation scale against the master motor delta.
-# `direction` controls whether each slave follows (+1) or opposes (-1) the
-# master's positive rotation.
-JAW_COUPLING = {
-    "master_motor_id": 25,
-    "slave_motor_ids": [26, 27],
-    "ratio": 1.0,
-    "directions": {
-        26: 1.0,
-        27: -1.0,
-    },
-}
+# DISABLED per lab request: motors 25, 26, 27 now move independently.
+# To restore, set JAW_COUPLING back to the dict kept below.
+JAW_COUPLING = None
+# JAW_COUPLING = {
+#     "master_motor_id": 25,
+#     "slave_motor_ids": [26, 27],
+#     "ratio": 1.0,
+#     "directions": {
+#         26: 1.0,
+#         27: -1.0,
+#     },
+# }

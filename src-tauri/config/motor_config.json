@@ -74,10 +74,10 @@
       "board": 0,
       "channel": 10,
       "boardAddress": 64,
-      "minApplied": 75.0,
+      "minApplied": 45.0,
       "maxApplied": 105.0,
       "offset": 0.0,
-      "minLogical": 75.0,
+      "minLogical": 45.0,
       "maxLogical": 105.0,
       "neutralApplied": 82.5,
       "neutralLogical": 82.5,
@@ -120,10 +120,10 @@
       "channel": 13,
       "boardAddress": 64,
       "minApplied": 75.0,
-      "maxApplied": 105.0,
+      "maxApplied": 135.0,
       "offset": 0.0,
       "minLogical": 75.0,
-      "maxLogical": 105.0,
+      "maxLogical": 135.0,
       "neutralApplied": 90.0,
       "neutralLogical": 90.0,
       "enabled": true
@@ -300,10 +300,10 @@
       "channel": 5,
       "boardAddress": 65,
       "minApplied": 70.0,
-      "maxApplied": 150.0,
+      "maxApplied": 170.0,
       "offset": 0.0,
       "minLogical": 70.0,
-      "maxLogical": 150.0,
+      "maxLogical": 170.0,
       "neutralApplied": 115.0,
       "neutralLogical": 115.0,
       "enabled": true
@@ -489,18 +489,7 @@
       "enabled": true
     }
   ],
-  "jawCoupling": {
-    "masterMotorId": 25,
-    "slaveMotorIds": [
-      26,
-      27
-    ],
-    "ratio": 1.0,
-    "directions": {
-      "26": 1.0,
-      "27": -1.0
-    }
-  },
+  "jawCoupling": null,
   "expressionPresets": [
     {
       "id": "\u559c\u60a6",

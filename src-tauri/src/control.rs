@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::net::{SocketAddr, UdpSocket};
@@ -13,6 +14,10 @@ use tracing::{info, warn};
 
 const MOTOR_COUNT: usize = 32;
 const HEARTBEAT_HZ: u64 = 100;
+// When all channels are settled the PCA9685 holds its PWM output, so frames
+// are only resent as a low-rate keepalive instead of at the full tick rate.
+const KEEPALIVE_TICK_DIVISOR: u64 = 10;
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_STEP_PER_TICK_DEG: f32 = 2.0;
 const CONFIG_PATH: &str = "config/motor_config.json";
 
@@ -57,6 +62,8 @@ impl MotorChannel {
 struct ConfigFile {
     transport: TransportConfig,
     channels: Vec<MotorChannel>,
+    jaw_coupling: Option<JawCouplingConfig>,
+    expression_presets: Vec<ExpressionPreset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +72,30 @@ struct TransportConfig {
     host: String,
     port: u16,
     board_addresses: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JawCouplingConfig {
+    master_motor_id: usize,
+    slave_motor_ids: Vec<usize>,
+    ratio: f32,
+    directions: BTreeMap<usize, f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionPreset {
+    pub id: String,
+    pub label: String,
+    pub angles: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionPresetSummary {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +117,26 @@ pub struct UdpControlFrame {
     pub timestamp_rfc3339: String,
     pub source: String,
     pub angles: Vec<f32>,
+}
+
+// On-wire view of a frame: the RFC3339 timestamp only exists for humans
+// reading logs, so it stays out of the UDP payload.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireFrame<'a> {
+    frame_id: u64,
+    timestamp_ns: u128,
+    source: &'a str,
+    angles: &'a [f32],
+}
+
+fn encode_wire(frame: &UdpControlFrame) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&WireFrame {
+        frame_id: frame.frame_id,
+        timestamp_ns: frame.timestamp_ns,
+        source: &frame.source,
+        angles: &frame.angles,
+    })?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +192,6 @@ impl FrameLogger {
             let mut writer = self.jsonl.lock().await;
             writer.write_all(&encoded)?;
             writer.write_all(b"\n")?;
-            writer.flush()?;
         }
 
         {
@@ -153,9 +203,14 @@ impl FrameLogger {
             row.push(frame.source.clone());
             row.extend(frame.angles.iter().map(|value| format!("{value:.4}")));
             csv_writer.write_record(row)?;
-            csv_writer.flush()?;
         }
 
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.jsonl.lock().await.flush()?;
+        self.csv.lock().await.flush()?;
         Ok(())
     }
 }
@@ -181,6 +236,8 @@ fn write_csv_header_if_empty(path: PathBuf, writer: &mut csv::Writer<std::fs::Fi
 struct InnerState {
     frame_seq: u64,
     channels: Vec<MotorChannel>,
+    jaw_coupling: Option<JawCouplingConfig>,
+    expression_presets: Vec<ExpressionPreset>,
     endpoint: Option<SocketAddr>,
     target_logical: Vec<f32>,
     target_applied: Vec<f32>,
@@ -191,13 +248,19 @@ struct InnerState {
 pub struct ControlService {
     logger: Arc<FrameLogger>,
     state: Arc<Mutex<InnerState>>,
+    socket: Arc<UdpSocket>,
 }
 
 impl ControlService {
     pub async fn new(log_dir: PathBuf, app_dir: PathBuf) -> Result<Self> {
         let logger = Arc::new(FrameLogger::new(&log_dir).await?);
+        let socket = Arc::new(
+            UdpSocket::bind("0.0.0.0:0").context("failed to bind UDP socket for control frames")?,
+        );
         let config = load_config(&app_dir)?;
         let channels = normalize_channels(config.channels)?;
+        let jaw_coupling = normalize_jaw_coupling(config.jaw_coupling, &channels)?;
+        let expression_presets = normalize_expression_presets(config.expression_presets)?;
 
         let target_logical = channels
             .iter()
@@ -215,6 +278,8 @@ impl ControlService {
         let state = Arc::new(Mutex::new(InnerState {
             frame_seq: 0,
             channels,
+            jaw_coupling,
+            expression_presets,
             endpoint: None,
             target_logical,
             target_applied,
@@ -222,9 +287,13 @@ impl ControlService {
             last_frame: None,
         }));
 
-        spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger));
+        spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger), Arc::clone(&socket));
 
-        Ok(Self { logger, state })
+        Ok(Self {
+            logger,
+            state,
+            socket,
+        })
     }
 
     pub async fn connect(&self, endpoint: String) -> Result<TransportStatus> {
@@ -261,14 +330,24 @@ impl ControlService {
         state.channels.clone()
     }
 
+    pub async fn expression_presets(&self) -> Vec<ExpressionPresetSummary> {
+        let state = self.state.lock().await;
+        state.expression_presets
+            .iter()
+            .map(|preset| ExpressionPresetSummary {
+                id: preset.id.clone(),
+                label: preset.label.clone(),
+            })
+            .collect()
+    }
+
     pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         if update.motor_id >= MOTOR_COUNT {
             bail!("motor_id {} out of range", update.motor_id);
         }
-        let channel = state.channels[update.motor_id].clone();
-        state.target_logical[update.motor_id] = channel.normalized_logical(update.logical_value);
-        state.target_applied[update.motor_id] = channel.logical_to_applied(update.logical_value);
+        apply_motor_target(&mut state, update.motor_id, update.logical_value);
+        maybe_apply_jaw_coupling(&mut state, update.motor_id);
         Ok(build_runtime_state(&state))
     }
 
@@ -279,10 +358,9 @@ impl ControlService {
 
         let mut state = self.state.lock().await;
         for (motor_id, logical) in logical_values.into_iter().enumerate() {
-            let channel = state.channels[motor_id].clone();
-            state.target_logical[motor_id] = channel.normalized_logical(logical);
-            state.target_applied[motor_id] = channel.logical_to_applied(logical);
+            apply_motor_target(&mut state, motor_id, logical);
         }
+        maybe_apply_jaw_coupling_from_master(&mut state);
         Ok(build_runtime_state(&state))
     }
 
@@ -296,6 +374,25 @@ impl ControlService {
         build_runtime_state(&state)
     }
 
+    pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
+        let mut state = self.state.lock().await;
+        let preset = state
+            .expression_presets
+            .iter()
+            .find(|preset| preset.id == preset_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("expression preset not found: {preset_id}"))?;
+
+        for (motor_id, applied_value) in preset.angles.iter().copied().enumerate() {
+            let channel = state.channels[motor_id].clone();
+            let applied_value = applied_value.clamp(channel.min_applied, channel.max_applied);
+            let logical_value = channel.normalized_logical(applied_value - channel.offset);
+            apply_motor_target_with_applied(&mut state, motor_id, logical_value, applied_value);
+        }
+
+        Ok(build_runtime_state(&state))
+    }
+
     pub async fn runtime_state(&self) -> RuntimeState {
         let state = self.state.lock().await;
         build_runtime_state(&state)
@@ -307,24 +404,24 @@ impl ControlService {
     }
 
     pub async fn flush_current_frame(&self) -> Result<Option<UdpControlFrame>> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         let endpoint = match state.endpoint {
             Some(endpoint) => endpoint,
             None => return Ok(None),
         };
+        state.frame_seq += 1;
         let frame = build_frame(
-            state.frame_seq + 1,
+            state.frame_seq,
             "manual-flush".to_string(),
             state.current_applied.clone(),
         )?;
+        state.last_frame = Some(frame.clone());
         drop(state);
 
-        send_frame(endpoint, &frame)?;
+        let payload = encode_wire(&frame)?;
+        self.socket.send_to(&payload, endpoint)?;
         self.logger.append(&frame).await?;
-
-        let mut state = self.state.lock().await;
-        state.frame_seq = frame.frame_id;
-        state.last_frame = Some(frame.clone());
+        self.logger.flush().await?;
         Ok(Some(frame))
     }
 }
@@ -354,6 +451,10 @@ impl AppState {
         self.service.channels().await
     }
 
+    pub async fn expression_presets(&self) -> Vec<ExpressionPresetSummary> {
+        self.service.expression_presets().await
+    }
+
     pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
         self.service.set_motor_target(update).await
     }
@@ -364,6 +465,10 @@ impl AppState {
 
     pub async fn center_all(&self) -> RuntimeState {
         self.service.center_all().await
+    }
+
+    pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
+        self.service.apply_expression_preset(preset_id).await
     }
 
     pub async fn runtime_state(&self) -> RuntimeState {
@@ -417,6 +522,145 @@ fn normalize_channels(channels: Vec<MotorChannel>) -> Result<Vec<MotorChannel>> 
         .ok_or_else(|| anyhow!("motor config missing channel ids"))
 }
 
+fn normalize_jaw_coupling(
+    jaw_coupling: Option<JawCouplingConfig>,
+    channels: &[MotorChannel],
+) -> Result<Option<JawCouplingConfig>> {
+    let Some(jaw_coupling) = jaw_coupling else {
+        return Ok(None);
+    };
+
+    if jaw_coupling.master_motor_id >= channels.len() {
+        bail!(
+            "jaw coupling master motor {} out of range",
+            jaw_coupling.master_motor_id
+        );
+    }
+    if jaw_coupling.slave_motor_ids.is_empty() {
+        bail!("jaw coupling must define at least one slave motor");
+    }
+    if !jaw_coupling.ratio.is_finite() {
+        bail!("jaw coupling ratio must be finite");
+    }
+
+    for slave_motor_id in &jaw_coupling.slave_motor_ids {
+        if *slave_motor_id >= channels.len() {
+            bail!("jaw coupling slave motor {} out of range", slave_motor_id);
+        }
+        if *slave_motor_id == jaw_coupling.master_motor_id {
+            bail!("jaw coupling slave motor cannot equal master motor");
+        }
+    }
+
+    Ok(Some(jaw_coupling))
+}
+
+fn normalize_expression_presets(
+    expression_presets: Vec<ExpressionPreset>,
+) -> Result<Vec<ExpressionPreset>> {
+    let mut ids = std::collections::BTreeSet::new();
+
+    for preset in &expression_presets {
+        if preset.id.trim().is_empty() {
+            bail!("expression preset id cannot be empty");
+        }
+        if preset.label.trim().is_empty() {
+            bail!("expression preset label cannot be empty");
+        }
+        if preset.angles.len() != MOTOR_COUNT {
+            bail!(
+                "expression preset '{}' must contain exactly {} angles",
+                preset.id,
+                MOTOR_COUNT
+            );
+        }
+        if !ids.insert(preset.id.clone()) {
+            bail!("duplicate expression preset id '{}'", preset.id);
+        }
+    }
+
+    Ok(expression_presets)
+}
+
+fn apply_motor_target(state: &mut InnerState, motor_id: usize, logical_value: f32) {
+    let channel = state.channels[motor_id].clone();
+    state.target_logical[motor_id] = channel.normalized_logical(logical_value);
+    state.target_applied[motor_id] = channel.logical_to_applied(logical_value);
+}
+
+fn apply_motor_target_with_applied(
+    state: &mut InnerState,
+    motor_id: usize,
+    logical_value: f32,
+    applied_value: f32,
+) {
+    let channel = state.channels[motor_id].clone();
+    state.target_logical[motor_id] = channel.normalized_logical(logical_value);
+    state.target_applied[motor_id] = applied_value.clamp(channel.min_applied, channel.max_applied);
+}
+
+fn maybe_apply_jaw_coupling(state: &mut InnerState, updated_motor_id: usize) {
+    let Some(jaw_coupling) = state.jaw_coupling.clone() else {
+        return;
+    };
+    if updated_motor_id != jaw_coupling.master_motor_id {
+        maybe_sync_jaw_slaves(state, updated_motor_id, &jaw_coupling);
+        return;
+    }
+    apply_jaw_coupling(state, &jaw_coupling);
+}
+
+fn maybe_apply_jaw_coupling_from_master(state: &mut InnerState) {
+    let Some(jaw_coupling) = state.jaw_coupling.clone() else {
+        return;
+    };
+    apply_jaw_coupling(state, &jaw_coupling);
+}
+
+fn apply_jaw_coupling(state: &mut InnerState, jaw_coupling: &JawCouplingConfig) {
+    let master_channel = state.channels[jaw_coupling.master_motor_id].clone();
+    let master_delta =
+        state.target_logical[jaw_coupling.master_motor_id] - master_channel.neutral_logical;
+    let shared_slave_delta = master_delta * jaw_coupling.ratio;
+
+    for slave_motor_id in &jaw_coupling.slave_motor_ids {
+        let direction = jaw_coupling
+            .directions
+            .get(slave_motor_id)
+            .copied()
+            .unwrap_or(1.0);
+        let slave_channel = state.channels[*slave_motor_id].clone();
+        let slave_logical = slave_channel.neutral_logical + shared_slave_delta;
+        let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
+        apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
+    }
+}
+
+fn maybe_sync_jaw_slaves(
+    state: &mut InnerState,
+    updated_motor_id: usize,
+    jaw_coupling: &JawCouplingConfig,
+) {
+    if !jaw_coupling.slave_motor_ids.contains(&updated_motor_id) {
+        return;
+    }
+
+    let source_logical = state.target_logical[updated_motor_id];
+    let source_channel = state.channels[updated_motor_id].clone();
+    let shared_slave_delta = source_logical - source_channel.neutral_logical;
+    for slave_motor_id in &jaw_coupling.slave_motor_ids {
+        let slave_channel = state.channels[*slave_motor_id].clone();
+        let direction = jaw_coupling
+            .directions
+            .get(slave_motor_id)
+            .copied()
+            .unwrap_or(1.0);
+        let slave_logical = slave_channel.neutral_logical + shared_slave_delta;
+        let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
+        apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
+    }
+}
+
 fn build_runtime_state(state: &InnerState) -> RuntimeState {
     RuntimeState {
         endpoint: state.endpoint.map(|value| value.to_string()),
@@ -458,74 +702,94 @@ fn step_towards(current: f32, target: f32) -> f32 {
     }
 }
 
-fn spawn_udp_heartbeat(state: Arc<Mutex<InnerState>>, logger: Arc<FrameLogger>) {
+fn spawn_udp_heartbeat(
+    state: Arc<Mutex<InnerState>>,
+    logger: Arc<FrameLogger>,
+    socket: Arc<UdpSocket>,
+) {
     tauri::async_runtime::spawn(async move {
-        let socket = match UdpSocket::bind("0.0.0.0:0") {
-            Ok(socket) => socket,
-            Err(error) => {
-                warn!("failed to bind UDP socket for heartbeat: {error}");
-                return;
-            }
-        };
-
         let mut ticker = tokio::time::interval(Duration::from_millis(1000 / HEARTBEAT_HZ));
+        let mut tick: u64 = 0;
+        let mut was_moving = false;
+        let mut log_dirty = false;
+        let mut last_flush = tokio::time::Instant::now();
+
         loop {
             ticker.tick().await;
+            tick = tick.wrapping_add(1);
 
+            let mut moving = false;
             let maybe_frame = {
                 let mut state = state.lock().await;
+                let state = &mut *state;
                 if let Some(endpoint) = state.endpoint {
                     for index in 0..MOTOR_COUNT {
-                        state.current_applied[index] =
-                            step_towards(state.current_applied[index], state.target_applied[index]);
+                        let current = state.current_applied[index];
+                        let target = state.target_applied[index];
+                        if current != target {
+                            moving = true;
+                            state.current_applied[index] = step_towards(current, target);
+                        }
                     }
 
-                    state.frame_seq += 1;
-                    let frame = match build_frame(
-                        state.frame_seq,
-                        "udp-heartbeat".to_string(),
-                        state.current_applied.clone(),
-                    ) {
-                        Ok(frame) => frame,
-                        Err(error) => {
-                            warn!("failed to build UDP frame: {error}");
-                            continue;
+                    if moving || tick % KEEPALIVE_TICK_DIVISOR == 0 {
+                        state.frame_seq += 1;
+                        let source = if moving {
+                            "udp-heartbeat"
+                        } else {
+                            "udp-keepalive"
+                        };
+                        match build_frame(
+                            state.frame_seq,
+                            source.to_string(),
+                            state.current_applied.clone(),
+                        ) {
+                            Ok(frame) => {
+                                state.last_frame = Some(frame.clone());
+                                Some((endpoint, frame))
+                            }
+                            Err(error) => {
+                                warn!("failed to build UDP frame: {error}");
+                                None
+                            }
                         }
-                    };
-                    state.last_frame = Some(frame.clone());
-                    Some((endpoint, frame))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             };
 
-            let Some((endpoint, frame)) = maybe_frame else {
-                continue;
-            };
-
-            let payload = match serde_json::to_vec(&frame) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    warn!("failed to encode UDP frame: {error}");
-                    continue;
+            if let Some((endpoint, frame)) = maybe_frame {
+                match encode_wire(&frame) {
+                    Ok(payload) => {
+                        if let Err(error) = socket.send_to(&payload, endpoint) {
+                            warn!("failed to send UDP frame to {endpoint}: {error}");
+                        }
+                    }
+                    Err(error) => warn!("failed to encode UDP frame: {error}"),
                 }
-            };
 
-            if let Err(error) = socket.send_to(&payload, endpoint) {
-                warn!("failed to send UDP frame to {endpoint}: {error}");
-                continue;
+                // Keepalive frames repeat unchanged angles, so only motion
+                // frames go to the log.
+                if moving {
+                    if let Err(error) = logger.append(&frame).await {
+                        warn!("failed to append UDP frame log: {error}");
+                    }
+                    log_dirty = true;
+                }
             }
 
-            if let Err(error) = logger.append(&frame).await {
-                warn!("failed to append UDP frame log: {error}");
+            let settled = was_moving && !moving;
+            if log_dirty && (settled || last_flush.elapsed() >= LOG_FLUSH_INTERVAL) {
+                if let Err(error) = logger.flush().await {
+                    warn!("failed to flush UDP frame log: {error}");
+                }
+                log_dirty = false;
+                last_flush = tokio::time::Instant::now();
             }
+            was_moving = moving;
         }
     });
-}
-
-fn send_frame(endpoint: SocketAddr, frame: &UdpControlFrame) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0")?;
-    let payload = serde_json::to_vec(frame)?;
-    socket.send_to(&payload, endpoint)?;
-    Ok(())
 }

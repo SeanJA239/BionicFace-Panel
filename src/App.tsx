@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
+  applyExpressionPreset,
   centerAll,
   connectPi,
   disconnectPi,
@@ -8,45 +9,99 @@ import {
   getMotorChannels,
   getRuntimeState,
   getTransportStatus,
+  listExpressionPresets,
   setMotorTarget,
+  type ExpressionPresetSummary,
   type MotorChannel,
   type RuntimeState,
   type UdpControlFrame,
 } from "./tauri";
 
-const DEFAULT_ENDPOINT = "192.168.1.50:6000";
+const DEFAULT_ENDPOINT = "192.168.137.93:6000";
 const MOTOR_COUNT = 32;
+// Slider drags fire change events far faster than the IPC round-trip is
+// worth; pending values are coalesced and sent at most ~30 times per second.
+const SEND_INTERVAL_MS = 33;
 
 function fallbackRuntime(): RuntimeState {
   return {
     endpoint: null,
     heartbeatHz: 100,
-    disabledMotorIds: [30, 31],
+    disabledMotorIds: [],
     targetLogical: Array(MOTOR_COUNT).fill(0),
     targetApplied: Array(MOTOR_COUNT).fill(0),
     currentApplied: Array(MOTOR_COUNT).fill(0),
   };
 }
 
+type SliderRowProps = {
+  channel: MotorChannel;
+  logicalValue: number;
+  appliedValue: number;
+  onChange: (motorId: number, value: number) => void;
+};
+
+const SliderRow = memo(function SliderRow({
+  channel,
+  logicalValue,
+  appliedValue,
+  onChange,
+}: SliderRowProps) {
+  return (
+    <label className={channel.enabled ? "slider-row dense" : "slider-row dense disabled"}>
+      <div className="slider-meta">
+        <strong>
+          #{channel.id} {channel.name}
+        </strong>
+        <span>
+          board {channel.board} / ch {channel.channel} / offset {channel.offset.toFixed(1)}
+        </span>
+        {!channel.enabled ? (
+          <span className="channel-badge">disabled in config</span>
+        ) : null}
+      </div>
+      <input
+        type="range"
+        min={channel.minLogical}
+        max={channel.maxLogical}
+        step={0.5}
+        value={logicalValue}
+        disabled={!channel.enabled}
+        onChange={(event) => onChange(channel.id, Number(event.target.value))}
+      />
+      <div className="value-pair">
+        <span>L {logicalValue.toFixed(1)}</span>
+        <span>A {appliedValue.toFixed(1)}</span>
+      </div>
+    </label>
+  );
+});
+
 function App() {
   const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT);
   const [channels, setChannels] = useState<MotorChannel[]>([]);
   const [runtime, setRuntime] = useState<RuntimeState>(fallbackRuntime);
+  const [expressionPresets, setExpressionPresets] = useState<ExpressionPresetSummary[]>([]);
   const [lastFrame, setLastFrame] = useState<UdpControlFrame | null>(null);
   const [status, setStatus] = useState("Loading config...");
   const [connected, setConnected] = useState(false);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const pendingSendsRef = useRef(new Map<number, number>());
+  const sendTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [motorChannels, runtimeState, transportStatus] = await Promise.all([
+        const [motorChannels, runtimeState, transportStatus, presets] = await Promise.all([
           getMotorChannels(),
           getRuntimeState(),
           getTransportStatus(),
+          listExpressionPresets(),
         ]);
         setChannels(motorChannels);
         setRuntime(runtimeState);
         setConnected(transportStatus.connected);
+        setExpressionPresets(presets);
         if (transportStatus.endpoint) {
           setEndpoint(transportStatus.endpoint);
         }
@@ -91,6 +146,7 @@ function App() {
     try {
       const next = await centerAll();
       setRuntime(next);
+      setActivePresetId(null);
       setStatus("All motor targets reset to neutral");
     } catch (error) {
       setStatus(String(error));
@@ -107,16 +163,60 @@ function App() {
     }
   }
 
-  async function handleSliderChange(motorId: number, value: number) {
-    setRuntime((current) => {
-      const next = { ...current, targetLogical: [...current.targetLogical] };
-      next.targetLogical[motorId] = value;
-      return next;
-    });
+  const flushPendingSends = useCallback(async () => {
+    sendTimerRef.current = null;
+    const pending = [...pendingSendsRef.current.entries()];
+    pendingSendsRef.current.clear();
+    for (const [motorId, value] of pending) {
+      try {
+        const next = await setMotorTarget(motorId, value);
+        setRuntime((current) => {
+          // A drag may have queued newer values while this response was in
+          // flight; keep those instead of the server echo.
+          if (pendingSendsRef.current.size === 0) return next;
+          const targetLogical = [...next.targetLogical];
+          for (const [id, pendingValue] of pendingSendsRef.current) {
+            targetLogical[id] = pendingValue;
+          }
+          return { ...next, targetLogical };
+        });
+      } catch (error) {
+        setStatus(String(error));
+      }
+    }
+  }, []);
 
+  const handleSliderChange = useCallback(
+    (motorId: number, value: number) => {
+      setActivePresetId(null);
+      setRuntime((current) => {
+        const next = { ...current, targetLogical: [...current.targetLogical] };
+        next.targetLogical[motorId] = value;
+        return next;
+      });
+
+      pendingSendsRef.current.set(motorId, value);
+      if (sendTimerRef.current === null) {
+        sendTimerRef.current = window.setTimeout(flushPendingSends, SEND_INTERVAL_MS);
+      }
+    },
+    [flushPendingSends],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (sendTimerRef.current !== null) {
+        window.clearTimeout(sendTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function handleApplyPreset(preset: ExpressionPresetSummary) {
     try {
-      const next = await setMotorTarget(motorId, value);
+      const next = await applyExpressionPreset(preset.id);
       setRuntime(next);
+      setActivePresetId(preset.id);
+      setStatus(`Expression preset applied: ${preset.label}`);
     } catch (error) {
       setStatus(String(error));
     }
@@ -151,6 +251,19 @@ function App() {
               Flush
             </button>
           </div>
+          {expressionPresets.length > 0 ? (
+            <div className="button-row">
+              {expressionPresets.map((preset) => (
+                <button
+                  className={activePresetId === preset.id ? "" : "secondary"}
+                  key={preset.id}
+                  onClick={() => handleApplyPreset(preset)}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
           <p className="status-line muted">{status}</p>
         </div>
@@ -169,42 +282,15 @@ function App() {
           </div>
 
           <div className="slider-stack calibration-grid">
-            {channels.map((channel) => {
-              const logicalValue = runtime.targetLogical[channel.id] ?? channel.neutralLogical;
-              const appliedValue = runtime.currentApplied[channel.id] ?? channel.neutralApplied;
-
-              return (
-                <label
-                  className={channel.enabled ? "slider-row dense" : "slider-row dense disabled"}
-                  key={channel.id}
-                >
-                  <div className="slider-meta">
-                    <strong>
-                      #{channel.id} {channel.name}
-                    </strong>
-                    <span>
-                      board {channel.board} / ch {channel.channel} / offset {channel.offset.toFixed(1)}
-                    </span>
-                    {!channel.enabled ? (
-                      <span className="channel-badge">disabled for current neck redesign</span>
-                    ) : null}
-                  </div>
-                  <input
-                    type="range"
-                    min={channel.minLogical}
-                    max={channel.maxLogical}
-                    step={0.5}
-                    value={logicalValue}
-                    disabled={!channel.enabled}
-                    onChange={(event) => handleSliderChange(channel.id, Number(event.target.value))}
-                  />
-                  <div className="value-pair">
-                    <span>L {logicalValue.toFixed(1)}</span>
-                    <span>A {appliedValue.toFixed(1)}</span>
-                  </div>
-                </label>
-              );
-            })}
+            {channels.map((channel) => (
+              <SliderRow
+                key={channel.id}
+                channel={channel}
+                logicalValue={runtime.targetLogical[channel.id] ?? channel.neutralLogical}
+                appliedValue={runtime.currentApplied[channel.id] ?? channel.neutralApplied}
+                onChange={handleSliderChange}
+              />
+            ))}
           </div>
         </article>
 

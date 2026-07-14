@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "raspi" / "config.py"
 OUTPUT_PATH = ROOT / "src-tauri" / "config" / "motor_config.json"
+EMOTION_PATH = ROOT / "emotion.md"
+
 
 def load_module(path: Path):
     spec = importlib.util.spec_from_file_location("raspi_config", path)
@@ -26,14 +29,15 @@ def build_channel(module, motor_id: int) -> dict:
     motor_map = module.MOTOR_MAP
     limits = getattr(module, "MOTOR_LIMITS", {})
     offsets = getattr(module, "MOTOR_OFFSET", {})
+    initial_applied = getattr(module, "MOTOR_INITIAL_APPLIED", {})
     names = getattr(module, "MOTOR_NAMES", {})
-    disabled_motors = set(getattr(module, "DISABLED_MOTORS", [30, 31]))
+    disabled_motors = set(getattr(module, "DISABLED_MOTORS", []))
     board_addresses = list(getattr(module, "BOARD_ADDRESSES", [0x40, 0x41]))
 
     board, channel = motor_map[motor_id]
     min_applied, max_applied = limits.get(motor_id, (0, 180))
     offset = float(offsets.get(motor_id, 0))
-    neutral_applied = (float(min_applied) + float(max_applied)) / 2.0
+    neutral_applied = float(initial_applied.get(motor_id, (float(min_applied) + float(max_applied)) / 2.0))
     neutral_applied = clamp(neutral_applied, float(min_applied), float(max_applied))
     neutral_logical = neutral_applied - offset
     enabled = motor_id not in disabled_motors
@@ -55,6 +59,60 @@ def build_channel(module, motor_id: int) -> dict:
     }
 
 
+def build_jaw_coupling(module) -> dict | None:
+    coupling = getattr(module, "JAW_COUPLING", None)
+    if not coupling:
+        return None
+
+    master_motor_id = int(coupling["master_motor_id"])
+    slave_motor_ids = [int(motor_id) for motor_id in coupling["slave_motor_ids"]]
+    ratio = float(coupling.get("ratio", 1.0))
+    raw_directions = coupling.get("directions", {})
+
+    directions = {}
+    for motor_id in slave_motor_ids:
+        directions[str(motor_id)] = float(raw_directions.get(motor_id, 1.0))
+
+    return {
+        "masterMotorId": master_motor_id,
+        "slaveMotorIds": slave_motor_ids,
+        "ratio": ratio,
+        "directions": directions,
+    }
+
+
+def parse_expression_presets(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+
+    raw = path.read_text(encoding="utf-8")
+    matches = list(re.finditer(r"^\s*(.+?)\s*[:：]\s*$", raw, re.MULTILINE))
+    presets: list[dict] = []
+
+    for index, match in enumerate(matches):
+        label = match.group(1).strip()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        block = raw[start:end]
+        numbers = [
+            float(value)
+            for value in re.findall(r"-?\d+(?:\.\d+)?", block)
+        ]
+        if len(numbers) != 32:
+            raise RuntimeError(
+                f"Expression preset '{label}' must contain exactly 32 angles, got {len(numbers)}"
+            )
+        presets.append(
+            {
+                "id": label,
+                "label": label,
+                "angles": numbers,
+            }
+        )
+
+    return presets
+
+
 def main() -> None:
     module = load_module(CONFIG_PATH)
     if len(module.MOTOR_MAP) != 32:
@@ -63,11 +121,13 @@ def main() -> None:
 
     payload = {
         "transport": {
-            "host": "0.0.0.0",
+            "host": "192.168.137.93",
             "port": int(getattr(module, "UDP_PORT", 6000)),
             "boardAddresses": list(getattr(module, "BOARD_ADDRESSES", [0x40, 0x41])),
         },
         "channels": channels,
+        "jawCoupling": build_jaw_coupling(module),
+        "expressionPresets": parse_expression_presets(EMOTION_PATH),
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

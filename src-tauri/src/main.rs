@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use control::{
-    AppState, MotorChannel, MotorTargetUpdate, RuntimeState, TransportStatus, UdpControlFrame,
+    AppState, ExpressionPresetSummary, MotorChannel, MotorTargetUpdate, RuntimeState,
+    TransportStatus, UdpControlFrame,
 };
 use tauri::{Manager, State};
 
@@ -29,6 +30,13 @@ async fn get_transport_status(state: State<'_, Arc<AppState>>) -> Result<Transpo
 #[tauri::command]
 async fn get_motor_channels(state: State<'_, Arc<AppState>>) -> Result<Vec<MotorChannel>, String> {
     Ok(state.channels().await)
+}
+
+#[tauri::command]
+async fn list_expression_presets(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ExpressionPresetSummary>, String> {
+    Ok(state.expression_presets().await)
 }
 
 #[tauri::command]
@@ -63,6 +71,17 @@ async fn center_all(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, Str
 }
 
 #[tauri::command]
+async fn apply_expression_preset(
+    state: State<'_, Arc<AppState>>,
+    preset_id: String,
+) -> Result<RuntimeState, String> {
+    state
+        .apply_expression_preset(&preset_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn get_runtime_state(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     Ok(state.runtime_state().await)
 }
@@ -91,11 +110,9 @@ fn init_tracing() {
     fmt().with_env_filter(filter).compact().init();
 }
 
-fn default_log_dir(app_handle: &tauri::AppHandle) -> PathBuf {
-    app_handle
-        .path()
-        .app_local_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("./logs"))
+fn default_log_dir(_app_handle: &tauri::AppHandle) -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
         .join("logs")
 }
 
@@ -120,9 +137,11 @@ pub fn run() {
             disconnect_pi,
             get_transport_status,
             get_motor_channels,
+            list_expression_presets,
             set_motor_target,
             set_all_targets,
             center_all,
+            apply_expression_preset,
             get_runtime_state,
             get_last_frame,
             flush_current_frame,

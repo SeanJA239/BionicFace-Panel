@@ -82,6 +82,11 @@ async fn apply_expression_preset(
 }
 
 #[tauri::command]
+async fn nod(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    state.nod().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn get_runtime_state(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     Ok(state.runtime_state().await)
 }
@@ -142,6 +147,7 @@ pub fn run() {
             set_all_targets,
             center_all,
             apply_expression_preset,
+            nod,
             get_runtime_state,
             get_last_frame,
             flush_current_frame,

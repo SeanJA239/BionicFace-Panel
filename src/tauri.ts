@@ -89,6 +89,10 @@ export async function applyExpressionPreset(presetId: string): Promise<RuntimeSt
   return safeInvoke("apply_expression_preset", { presetId });
 }
 
+export async function nod(): Promise<RuntimeState> {
+  return safeInvoke("nod");
+}
+
 export async function getRuntimeState(): Promise<RuntimeState> {
   return safeInvoke("get_runtime_state");
 }

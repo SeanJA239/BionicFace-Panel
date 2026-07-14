@@ -121,7 +121,7 @@ def main() -> None:
 
     payload = {
         "transport": {
-            "host": "192.168.137.93",
+            "host": "192.168.1.101",
             "port": int(getattr(module, "UDP_PORT", 6000)),
             "boardAddresses": list(getattr(module, "BOARD_ADDRESSES", [0x40, 0x41])),
         },

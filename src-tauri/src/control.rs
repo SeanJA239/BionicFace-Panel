@@ -21,6 +21,15 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_STEP_PER_TICK_DEG: f32 = 2.0;
 const CONFIG_PATH: &str = "config/motor_config.json";
 
+// Nod action: neck motors 30/31 are a mirror pair. Motor 30 lifts up by
+// increasing its angle; motor 31 mirrors it. Amplitude stays within the
+// conservative neck limits, so a nod is ~±15 deg around neutral.
+const NECK_UP_MOTOR: usize = 30;
+const NECK_MIRROR_MOTOR: usize = 31;
+const NOD_AMPLITUDE_DEG: f32 = 15.0;
+const NOD_CYCLES: usize = 2;
+const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MotorChannel {
@@ -393,6 +402,46 @@ impl ControlService {
         Ok(build_runtime_state(&state))
     }
 
+    async fn set_neck_targets(&self, applied_up_motor: f32, applied_mirror_motor: f32) {
+        let mut state = self.state.lock().await;
+        for (motor_id, applied) in [
+            (NECK_UP_MOTOR, applied_up_motor),
+            (NECK_MIRROR_MOTOR, applied_mirror_motor),
+        ] {
+            let channel = state.channels[motor_id].clone();
+            let applied = applied.clamp(channel.min_applied, channel.max_applied);
+            let logical = channel.normalized_logical(applied - channel.offset);
+            apply_motor_target_with_applied(&mut state, motor_id, logical, applied);
+        }
+    }
+
+    /// Nod the head: oscillate the neck mirror pair up/down for a couple of
+    /// cycles, then return to neutral. Targets are set over time and the
+    /// heartbeat interpolates + dispatches them.
+    pub async fn nod(&self) -> Result<RuntimeState> {
+        let (neutral_up, neutral_mirror) = {
+            let state = self.state.lock().await;
+            (
+                state.channels[NECK_UP_MOTOR].neutral_applied,
+                state.channels[NECK_MIRROR_MOTOR].neutral_applied,
+            )
+        };
+        // "Up" lifts motor 30 by increasing its angle; motor 31 mirrors it.
+        let up = (neutral_up + NOD_AMPLITUDE_DEG, neutral_mirror - NOD_AMPLITUDE_DEG);
+        let down = (neutral_up - NOD_AMPLITUDE_DEG, neutral_mirror + NOD_AMPLITUDE_DEG);
+
+        for _ in 0..NOD_CYCLES {
+            self.set_neck_targets(up.0, up.1).await;
+            tokio::time::sleep(NOD_PHASE_DWELL).await;
+            self.set_neck_targets(down.0, down.1).await;
+            tokio::time::sleep(NOD_PHASE_DWELL).await;
+        }
+        self.set_neck_targets(neutral_up, neutral_mirror).await;
+        tokio::time::sleep(NOD_PHASE_DWELL).await;
+
+        Ok(self.runtime_state().await)
+    }
+
     pub async fn runtime_state(&self) -> RuntimeState {
         let state = self.state.lock().await;
         build_runtime_state(&state)
@@ -469,6 +518,10 @@ impl AppState {
 
     pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
         self.service.apply_expression_preset(preset_id).await
+    }
+
+    pub async fn nod(&self) -> Result<RuntimeState> {
+        self.service.nod().await
     }
 
     pub async fn runtime_state(&self) -> RuntimeState {

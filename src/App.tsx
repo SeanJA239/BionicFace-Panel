@@ -10,6 +10,7 @@ import {
   getRuntimeState,
   getTransportStatus,
   listExpressionPresets,
+  nod,
   setMotorTarget,
   type ExpressionPresetSummary,
   type MotorChannel,
@@ -17,7 +18,7 @@ import {
   type UdpControlFrame,
 } from "./tauri";
 
-const DEFAULT_ENDPOINT = "192.168.137.93:6000";
+const DEFAULT_ENDPOINT = "192.168.1.101:6000";
 const MOTOR_COUNT = 32;
 // Slider drags fire change events far faster than the IPC round-trip is
 // worth; pending values are coalesced and sent at most ~30 times per second.
@@ -153,6 +154,17 @@ function App() {
     }
   }
 
+  async function handleNod() {
+    try {
+      setStatus("Nodding...");
+      const next = await nod();
+      setRuntime(next);
+      setStatus("Nod complete");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
   async function handleFlush() {
     try {
       const frame = await flushCurrentFrame();
@@ -246,6 +258,9 @@ function App() {
             </button>
             <button className="secondary" onClick={handleCenterAll}>
               Center All
+            </button>
+            <button className="secondary" onClick={handleNod}>
+              Nod
             </button>
             <button className="secondary" onClick={handleFlush}>
               Flush

@@ -48,7 +48,8 @@ MOTOR_NAMES = {
 
 # Channels listed here stay in the 32-channel protocol but are held at their
 # neutral position and hidden from calibration input.
-DISABLED_MOTORS = []
+# 28/29 (tongue) disabled for now per lab request.
+DISABLED_MOTORS = [28, 29]
 
 MOTOR_MAP = {
     # eyebrow_rigid
@@ -92,16 +93,16 @@ MOTOR_MAP = {
 MOTOR_LIMITS = {
     0: (40, 100),  # 90-zero
     1: (80, 120),  # 90-zero
-    2: (75, 130),  # 90-zero
-    3: (50, 80),  # 90-zero
-    4: (75, 105),  # 90-zero tendon
+    2: (75, 150),  # 90-zero
+    3: (40, 80),  # 90-zero
+    4: (45, 105),  # 90-zero tendon
     5: (75, 105),  # 90-zero tendon
     6: (75, 105),  # 90-zero tendon
-    7: (75, 105),  # 90-zero tendon
-    8: (45, 135),  # 90-zero
+    7: (75, 135),  # 90-zero tendon
+    8: (75, 135),  # 90-zero
     9: (35, 135),
     10: (60, 175),
-    11: (60, 150),
+    11: (60, 110),
     12: (0, 135),
     13: (30, 135),
     14: (45, 105),  # 90-mid
@@ -109,15 +110,15 @@ MOTOR_LIMITS = {
     16: (75, 135),  # 90-mid
     17: (0, 80),  # 90-mid
     18: (90, 130),  # 90-mid
-    19: (70, 150),  # 90-mid
+    19: (70, 170),  # 90-mid
     20: (90, 130),  # 90-mid
     21: (80, 120),  # 90-rand
     22: (90, 130),  # 90-rand
     23: (15, 125),  # 90-mid
     24: (60, 120),  # 90-zero-r
     25: (75, 110),
-    26: (60, 100),
-    27: (95, 135),
+    26: (60, 135),
+    27: (60, 135),
     28: (75, 105),  # 90-mid-r
     29: (75, 105),
     # Neck structure is back in service but not yet calibrated end-to-end;
@@ -141,23 +142,23 @@ MOTOR_OFFSET = {
 
 # Explicit startup / neutral servo angles in applied servo degrees.
 MOTOR_INITIAL_APPLIED = {
-    0: 85.0,
-    1: 100.0,
-    2: 100.0,
-    3: 78.0,
+    0: 100.0,
+    1: 105.0,
+    2: 85.0,
+    3: 62.0,
     4: 82.5,
     5: 90.0,
     6: 90.0,
     7: 90.0,
     8: 90.0,
-    9: 69.0,
-    10: 97.5,
-    11: 118.0,
+    9: 118.0,
+    10: 108.5,
+    11: 89.0,
     12: 97.5,
     13: 105.0,
     14: 90.0,
     15: 105.0,
-    16: 90.0,
+    16: 88.0,
     17: 40.0,
     18: 110.0,
     19: 115.0,
@@ -166,29 +167,23 @@ MOTOR_INITIAL_APPLIED = {
     22: 90.0,
     23: 85.0,
     24: 89.5,
-    25: 79.0,
-    26: 63.0,
-    27: 117.0,
+    25: 110.0,
+    26: 94.0,
+    27: 95.0,
     28: 79.5,
     29: 79.0,
     30: 90.0,
     31: 90.0,
 }
 
-# Optional jaw linkage compensation.
-# The control layer treats motor 25 as the master lift axis. When motor 25 moves
-# away from its neutral position, motors 26 and 27 receive proportional
-# compensation relative to their own neutral positions.
-#
-# `ratio` is the absolute compensation scale against the master motor delta.
-# `direction` controls whether each slave follows (+1) or opposes (-1) the
-# master's positive rotation.
+# Jaw linkage compensation.
+# Motor 25 is independent. Only 26 and 27 are bound as a mirror pair: 26 is the
+# master, 27 follows it in the opposite direction (they are physically mirrored).
 JAW_COUPLING = {
-    "master_motor_id": 25,
-    "slave_motor_ids": [26, 27],
+    "master_motor_id": 26,
+    "slave_motor_ids": [27],
     "ratio": 1.0,
     "directions": {
-        26: 1.0,
         27: -1.0,
     },
 }

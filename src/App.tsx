@@ -10,6 +10,7 @@ import {
   getRuntimeState,
   getTransportStatus,
   listExpressionPresets,
+  nod,
   setMotorTarget,
   type ExpressionPresetSummary,
   type MotorChannel,
@@ -153,6 +154,17 @@ function App() {
     }
   }
 
+  async function handleNod() {
+    try {
+      setStatus("Nodding...");
+      const next = await nod();
+      setRuntime(next);
+      setStatus("Nod complete");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
   async function handleFlush() {
     try {
       const frame = await flushCurrentFrame();
@@ -246,6 +258,9 @@ function App() {
             </button>
             <button className="secondary" onClick={handleCenterAll}>
               Center All
+            </button>
+            <button className="secondary" onClick={handleNod}>
+              Nod
             </button>
             <button className="secondary" onClick={handleFlush}>
               Flush

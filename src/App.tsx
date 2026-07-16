@@ -12,6 +12,7 @@ import {
   listExpressionPresets,
   nod,
   setMotorTarget,
+  wink,
   type ExpressionPresetSummary,
   type MotorChannel,
   type RuntimeState,
@@ -165,6 +166,18 @@ function App() {
     }
   }
 
+  async function handleWink() {
+    try {
+      setStatus("Winking...");
+      const next = await wink();
+      setRuntime(next);
+      setActivePresetId(null);
+      setStatus("Wink complete (returned to center)");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
   async function handleFlush() {
     try {
       const frame = await flushCurrentFrame();
@@ -272,7 +285,7 @@ function App() {
                 <button
                   className={activePresetId === preset.id ? "" : "secondary"}
                   key={preset.id}
-                  onClick={() => handleApplyPreset(preset)}
+                  onClick={() => (preset.id === "wink" ? handleWink() : handleApplyPreset(preset))}
                 >
                   {preset.label}
                 </button>

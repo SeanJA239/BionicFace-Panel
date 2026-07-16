@@ -87,6 +87,11 @@ async fn nod(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
 }
 
 #[tauri::command]
+async fn wink(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    state.wink().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn get_runtime_state(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     Ok(state.runtime_state().await)
 }
@@ -148,6 +153,7 @@ pub fn run() {
             center_all,
             apply_expression_preset,
             nod,
+            wink,
             get_runtime_state,
             get_last_frame,
             flush_current_frame,

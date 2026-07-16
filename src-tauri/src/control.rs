@@ -30,6 +30,10 @@ const NOD_AMPLITUDE_DEG: f32 = 15.0;
 const NOD_CYCLES: usize = 2;
 const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
 
+// Wink holds the wink pose briefly, then returns to the center-all neutral.
+const WINK_HOLD: Duration = Duration::from_millis(500);
+const WINK_PRESET_ID: &str = "wink";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MotorChannel {
@@ -415,6 +419,14 @@ impl ControlService {
         }
     }
 
+    /// Wink: apply the wink pose, hold briefly, then return everything to the
+    /// center-all neutral. Pose angles live in the "wink" expression preset.
+    pub async fn wink(&self) -> Result<RuntimeState> {
+        self.apply_expression_preset(WINK_PRESET_ID).await?;
+        tokio::time::sleep(WINK_HOLD).await;
+        Ok(self.center_all().await)
+    }
+
     /// Nod the head: oscillate the neck mirror pair up/down for a couple of
     /// cycles, then return to neutral. Targets are set over time and the
     /// heartbeat interpolates + dispatches them.
@@ -522,6 +534,10 @@ impl AppState {
 
     pub async fn nod(&self) -> Result<RuntimeState> {
         self.service.nod().await
+    }
+
+    pub async fn wink(&self) -> Result<RuntimeState> {
+        self.service.wink().await
     }
 
     pub async fn runtime_state(&self) -> RuntimeState {

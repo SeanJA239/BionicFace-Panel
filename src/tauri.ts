@@ -93,6 +93,10 @@ export async function nod(): Promise<RuntimeState> {
   return safeInvoke("nod");
 }
 
+export async function wink(): Promise<RuntimeState> {
+  return safeInvoke("wink");
+}
+
 export async function getRuntimeState(): Promise<RuntimeState> {
   return safeInvoke("get_runtime_state");
 }

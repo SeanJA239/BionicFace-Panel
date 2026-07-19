@@ -75,9 +75,6 @@ impl MotorChannel {
     /// when the neutral is off-center. A side with zero span (neutral pinned to a
     /// limit) simply produces no motion in that direction.
     ///
-    /// Not yet wired into the command pipeline — added in the normalization
-    /// Phase 0 (pure math + tests, no behavior change). Phase 1 makes it live.
-    #[allow(dead_code)]
     fn norm_to_applied(&self, norm: f32) -> f32 {
         let norm = norm.clamp(-1.0, 1.0);
         let applied = if norm >= 0.0 {
@@ -91,7 +88,6 @@ impl MotorChannel {
     /// Inverse of [`norm_to_applied`]: map a physical applied angle to a bipolar
     /// normalized value in `[-1, 1]`. A zero-span side maps to `0` so there is no
     /// division by zero when the neutral is pinned to a limit.
-    #[allow(dead_code)]
     fn applied_to_norm(&self, applied: f32) -> f32 {
         let applied = applied.clamp(self.min_applied, self.max_applied);
         let norm = if applied >= self.neutral_applied {
@@ -163,6 +159,10 @@ pub struct RuntimeState {
     pub target_logical: Vec<f32>,
     pub target_applied: Vec<f32>,
     pub current_applied: Vec<f32>,
+    // Bipolar normalized views (-1..1) of the target/current applied angles,
+    // derived per channel. Added in normalization phase 1 for the UI.
+    pub target_norm: Vec<f32>,
+    pub current_norm: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -420,6 +420,29 @@ impl ControlService {
         Ok(build_runtime_state(&state))
     }
 
+    pub async fn set_motor_target_norm(&self, motor_id: usize, norm: f32) -> Result<RuntimeState> {
+        let mut state = self.state.lock().await;
+        if motor_id >= MOTOR_COUNT {
+            bail!("motor_id {} out of range", motor_id);
+        }
+        apply_motor_target_norm(&mut state, motor_id, norm);
+        maybe_apply_jaw_coupling(&mut state, motor_id);
+        Ok(build_runtime_state(&state))
+    }
+
+    pub async fn set_all_targets_norm(&self, norm_values: Vec<f32>) -> Result<RuntimeState> {
+        if norm_values.len() != MOTOR_COUNT {
+            bail!("norm_values must contain exactly 32 items");
+        }
+
+        let mut state = self.state.lock().await;
+        for (motor_id, norm) in norm_values.into_iter().enumerate() {
+            apply_motor_target_norm(&mut state, motor_id, norm);
+        }
+        maybe_apply_jaw_coupling_from_master(&mut state);
+        Ok(build_runtime_state(&state))
+    }
+
     pub async fn center_all(&self) -> RuntimeState {
         let mut state = self.state.lock().await;
         let channels = state.channels.clone();
@@ -567,6 +590,14 @@ impl AppState {
         self.service.set_all_targets(logical_values).await
     }
 
+    pub async fn set_motor_target_norm(&self, motor_id: usize, norm: f32) -> Result<RuntimeState> {
+        self.service.set_motor_target_norm(motor_id, norm).await
+    }
+
+    pub async fn set_all_targets_norm(&self, norm_values: Vec<f32>) -> Result<RuntimeState> {
+        self.service.set_all_targets_norm(norm_values).await
+    }
+
     pub async fn center_all(&self) -> RuntimeState {
         self.service.center_all().await
     }
@@ -711,6 +742,20 @@ fn apply_motor_target_with_applied(
     state.target_applied[motor_id] = applied_value.clamp(channel.min_applied, channel.max_applied);
 }
 
+/// Set a channel target from a bipolar normalized value (-1..1). Disabled
+/// channels hold their neutral, mirroring the degree-based path.
+fn apply_motor_target_norm(state: &mut InnerState, motor_id: usize, norm: f32) {
+    let channel = state.channels[motor_id].clone();
+    if !channel.enabled {
+        state.target_logical[motor_id] = channel.neutral_logical;
+        state.target_applied[motor_id] = channel.neutral_applied;
+        return;
+    }
+    let applied = channel.norm_to_applied(norm);
+    let logical = channel.normalized_logical(applied - channel.offset);
+    apply_motor_target_with_applied(state, motor_id, logical, applied);
+}
+
 fn maybe_apply_jaw_coupling(state: &mut InnerState, updated_motor_id: usize) {
     let Some(jaw_coupling) = state.jaw_coupling.clone() else {
         return;
@@ -786,7 +831,18 @@ fn build_runtime_state(state: &InnerState) -> RuntimeState {
         target_logical: state.target_logical.clone(),
         target_applied: state.target_applied.clone(),
         current_applied: state.current_applied.clone(),
+        target_norm: normalized_view(&state.channels, &state.target_applied),
+        current_norm: normalized_view(&state.channels, &state.current_applied),
     }
+}
+
+/// Map a vector of applied angles to their per-channel bipolar normalized view.
+fn normalized_view(channels: &[MotorChannel], applied: &[f32]) -> Vec<f32> {
+    channels
+        .iter()
+        .zip(applied.iter())
+        .map(|(channel, value)| channel.applied_to_norm(*value))
+        .collect()
 }
 
 fn build_frame(frame_id: u64, source: String, angles: Vec<f32>) -> Result<UdpControlFrame> {

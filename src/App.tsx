@@ -33,6 +33,8 @@ function fallbackRuntime(): RuntimeState {
     targetLogical: Array(MOTOR_COUNT).fill(0),
     targetApplied: Array(MOTOR_COUNT).fill(0),
     currentApplied: Array(MOTOR_COUNT).fill(0),
+    targetNorm: Array(MOTOR_COUNT).fill(0),
+    currentNorm: Array(MOTOR_COUNT).fill(0),
   };
 }
 

@@ -66,6 +66,29 @@ async fn set_all_targets(
 }
 
 #[tauri::command]
+async fn set_motor_target_norm(
+    state: State<'_, Arc<AppState>>,
+    motor_id: usize,
+    norm: f32,
+) -> Result<RuntimeState, String> {
+    state
+        .set_motor_target_norm(motor_id, norm)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn set_all_targets_norm(
+    state: State<'_, Arc<AppState>>,
+    norm_values: Vec<f32>,
+) -> Result<RuntimeState, String> {
+    state
+        .set_all_targets_norm(norm_values)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn center_all(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     Ok(state.center_all().await)
 }
@@ -150,6 +173,8 @@ pub fn run() {
             list_expression_presets,
             set_motor_target,
             set_all_targets,
+            set_motor_target_norm,
+            set_all_targets_norm,
             center_all,
             apply_expression_preset,
             nod,

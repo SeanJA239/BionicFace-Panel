@@ -29,6 +29,9 @@ export type RuntimeState = {
   targetLogical: number[];
   targetApplied: number[];
   currentApplied: number[];
+  // Bipolar normalized (-1..1) views, derived per channel (phase 1).
+  targetNorm: number[];
+  currentNorm: number[];
 };
 
 export type UdpControlFrame = {
@@ -79,6 +82,14 @@ export async function setMotorTarget(motorId: number, logicalValue: number): Pro
 
 export async function setAllTargets(logicalValues: number[]): Promise<RuntimeState> {
   return safeInvoke("set_all_targets", { logicalValues });
+}
+
+export async function setMotorTargetNorm(motorId: number, norm: number): Promise<RuntimeState> {
+  return safeInvoke("set_motor_target_norm", { motorId, norm });
+}
+
+export async function setAllTargetsNorm(normValues: number[]): Promise<RuntimeState> {
+  return safeInvoke("set_all_targets_norm", { normValues });
 }
 
 export async function centerAll(): Promise<RuntimeState> {

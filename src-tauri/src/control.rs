@@ -68,6 +68,49 @@ impl MotorChannel {
             logical.clamp(self.min_logical, self.max_logical)
         }
     }
+
+    /// Map a bipolar normalized value in `[-1, 1]` to a physical applied angle.
+    /// `0` -> neutral, `+1` -> `max_applied`, `-1` -> `min_applied`. The mapping
+    /// is piecewise-linear about the neutral so both end anchors stay exact even
+    /// when the neutral is off-center. A side with zero span (neutral pinned to a
+    /// limit) simply produces no motion in that direction.
+    ///
+    /// Not yet wired into the command pipeline — added in the normalization
+    /// Phase 0 (pure math + tests, no behavior change). Phase 1 makes it live.
+    #[allow(dead_code)]
+    fn norm_to_applied(&self, norm: f32) -> f32 {
+        let norm = norm.clamp(-1.0, 1.0);
+        let applied = if norm >= 0.0 {
+            self.neutral_applied + norm * (self.max_applied - self.neutral_applied)
+        } else {
+            self.neutral_applied + norm * (self.neutral_applied - self.min_applied)
+        };
+        applied.clamp(self.min_applied, self.max_applied)
+    }
+
+    /// Inverse of [`norm_to_applied`]: map a physical applied angle to a bipolar
+    /// normalized value in `[-1, 1]`. A zero-span side maps to `0` so there is no
+    /// division by zero when the neutral is pinned to a limit.
+    #[allow(dead_code)]
+    fn applied_to_norm(&self, applied: f32) -> f32 {
+        let applied = applied.clamp(self.min_applied, self.max_applied);
+        let norm = if applied >= self.neutral_applied {
+            let span = self.max_applied - self.neutral_applied;
+            if span <= f32::EPSILON {
+                0.0
+            } else {
+                (applied - self.neutral_applied) / span
+            }
+        } else {
+            let span = self.neutral_applied - self.min_applied;
+            if span <= f32::EPSILON {
+                0.0
+            } else {
+                (applied - self.neutral_applied) / span
+            }
+        };
+        norm.clamp(-1.0, 1.0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -861,4 +904,98 @@ fn spawn_udp_heartbeat(
             was_moving = moving;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ch(min_applied: f32, max_applied: f32, neutral_applied: f32) -> MotorChannel {
+        MotorChannel {
+            id: 0,
+            name: "test".to_string(),
+            board: 0,
+            channel: 0,
+            board_address: 0x40,
+            min_applied,
+            max_applied,
+            offset: 0.0,
+            min_logical: min_applied,
+            max_logical: max_applied,
+            neutral_applied,
+            neutral_logical: neutral_applied,
+            enabled: true,
+        }
+    }
+
+    fn approx(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn norm_anchors_hit_exact_endpoints() {
+        // motor 9-like: off-center neutral (min 35, max 150, neutral 118)
+        let c = ch(35.0, 150.0, 118.0);
+        approx(c.norm_to_applied(1.0), 150.0);
+        approx(c.norm_to_applied(0.0), 118.0);
+        approx(c.norm_to_applied(-1.0), 35.0);
+    }
+
+    #[test]
+    fn norm_piecewise_is_asymmetric_about_neutral() {
+        let c = ch(35.0, 150.0, 118.0);
+        // +0.5 uses the up span (32), -0.5 uses the down span (83)
+        approx(c.norm_to_applied(0.5), 134.0);
+        approx(c.norm_to_applied(-0.5), 76.5);
+    }
+
+    #[test]
+    fn applied_to_norm_is_the_inverse() {
+        let c = ch(35.0, 150.0, 118.0);
+        approx(c.applied_to_norm(150.0), 1.0);
+        approx(c.applied_to_norm(118.0), 0.0);
+        approx(c.applied_to_norm(35.0), -1.0);
+        approx(c.applied_to_norm(134.0), 0.5);
+        approx(c.applied_to_norm(76.5), -0.5);
+    }
+
+    #[test]
+    fn norm_applied_roundtrip() {
+        let c = ch(35.0, 150.0, 118.0);
+        for &n in &[-1.0f32, -0.7, -0.3, 0.0, 0.25, 0.6, 1.0] {
+            approx(c.applied_to_norm(c.norm_to_applied(n)), n);
+        }
+    }
+
+    #[test]
+    fn out_of_range_norm_clamps_to_limits() {
+        let c = ch(35.0, 150.0, 118.0);
+        approx(c.norm_to_applied(2.0), 150.0);
+        approx(c.norm_to_applied(-2.0), 35.0);
+    }
+
+    #[test]
+    fn degenerate_neutral_at_min_is_one_sided() {
+        // motor 27-like: neutral == min, zero down span -> only [0, 1] moves
+        let c = ch(60.0, 135.0, 60.0);
+        approx(c.norm_to_applied(1.0), 135.0);
+        approx(c.norm_to_applied(0.0), 60.0);
+        approx(c.norm_to_applied(-1.0), 60.0);
+        approx(c.applied_to_norm(60.0), 0.0);
+        approx(c.applied_to_norm(135.0), 1.0);
+    }
+
+    #[test]
+    fn degenerate_neutral_at_max_is_one_sided() {
+        // motor 26-like: neutral == max, zero up span -> only [-1, 0] moves
+        let c = ch(60.0, 135.0, 135.0);
+        approx(c.norm_to_applied(-1.0), 60.0);
+        approx(c.norm_to_applied(0.0), 135.0);
+        approx(c.norm_to_applied(1.0), 135.0);
+        approx(c.applied_to_norm(135.0), 0.0);
+        approx(c.applied_to_norm(60.0), -1.0);
+    }
 }

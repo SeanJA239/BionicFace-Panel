@@ -787,8 +787,11 @@ fn apply_jaw_coupling(state: &mut InnerState, jaw_coupling: &JawCouplingConfig) 
             .copied()
             .unwrap_or(1.0);
         let slave_channel = state.channels[*slave_motor_id].clone();
-        let slave_logical = slave_channel.neutral_logical + shared_slave_delta;
         let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
+        // Derive the logical view from the (direction-applied) applied value so
+        // the two stay consistent; computing it independently dropped the
+        // `direction` and made a -1 slave's slider snap back on release.
+        let slave_logical = slave_applied - slave_channel.offset;
         apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
     }
 }

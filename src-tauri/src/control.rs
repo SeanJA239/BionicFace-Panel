@@ -802,20 +802,32 @@ fn maybe_sync_jaw_slaves(
         return;
     }
 
-    let source_logical = state.target_logical[updated_motor_id];
-    let source_channel = state.channels[updated_motor_id].clone();
-    let shared_slave_delta = source_logical - source_channel.neutral_logical;
-    for slave_motor_id in &jaw_coupling.slave_motor_ids {
-        let slave_channel = state.channels[*slave_motor_id].clone();
-        let direction = jaw_coupling
-            .directions
-            .get(slave_motor_id)
-            .copied()
-            .unwrap_or(1.0);
-        let slave_logical = slave_channel.neutral_logical + shared_slave_delta;
-        let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
-        apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
+    // Back-solve the master delta from the dragged slave's applied position,
+    // then re-drive the master and every slave so the whole group stays on one
+    // coupling curve. The old code re-applied the slave's own `direction` to
+    // itself, which inverted the drag and pinned the slave against a limit.
+    let direction = jaw_coupling
+        .directions
+        .get(&updated_motor_id)
+        .copied()
+        .unwrap_or(1.0);
+    let denom = jaw_coupling.ratio * direction;
+    if denom.abs() <= f32::EPSILON {
+        return;
     }
+    let source_channel = state.channels[updated_motor_id].clone();
+    let master_delta =
+        (state.target_applied[updated_motor_id] - source_channel.neutral_applied) / denom;
+
+    let master_id = jaw_coupling.master_motor_id;
+    let master_channel = state.channels[master_id].clone();
+    apply_motor_target_with_applied(
+        state,
+        master_id,
+        master_channel.neutral_logical + master_delta,
+        master_channel.neutral_applied + master_delta,
+    );
+    apply_jaw_coupling(state, jaw_coupling);
 }
 
 fn build_runtime_state(state: &InnerState) -> RuntimeState {

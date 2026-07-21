@@ -491,11 +491,7 @@
   ],
   "jawCoupling": {
     "masterMotorId": 26,
-    "slaveMotorIds": [
-      27
-    ],
-    "ratio": 1.0,
-    "directions": {
+    "slaveRatios": {
       "27": -1.0
     }
   },

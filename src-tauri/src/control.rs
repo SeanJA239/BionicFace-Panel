@@ -130,9 +130,10 @@ struct TransportConfig {
 #[serde(rename_all = "camelCase")]
 struct JawCouplingConfig {
     master_motor_id: usize,
-    slave_motor_ids: Vec<usize>,
-    ratio: f32,
-    directions: BTreeMap<usize, f32>,
+    // Signed ratio per slave in normalized (-1..1) space: slave_norm = master_norm * ratio.
+    // A ratio of -1.0 mirrors the master's full travel onto the slave's full travel,
+    // regardless of how their physical degree ranges compare.
+    slave_ratios: BTreeMap<usize, f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -679,19 +680,22 @@ fn normalize_jaw_coupling(
             jaw_coupling.master_motor_id
         );
     }
-    if jaw_coupling.slave_motor_ids.is_empty() {
+    if jaw_coupling.slave_ratios.is_empty() {
         bail!("jaw coupling must define at least one slave motor");
     }
-    if !jaw_coupling.ratio.is_finite() {
-        bail!("jaw coupling ratio must be finite");
-    }
 
-    for slave_motor_id in &jaw_coupling.slave_motor_ids {
-        if *slave_motor_id >= channels.len() {
+    for (&slave_motor_id, &ratio) in &jaw_coupling.slave_ratios {
+        if slave_motor_id >= channels.len() {
             bail!("jaw coupling slave motor {} out of range", slave_motor_id);
         }
-        if *slave_motor_id == jaw_coupling.master_motor_id {
+        if slave_motor_id == jaw_coupling.master_motor_id {
             bail!("jaw coupling slave motor cannot equal master motor");
+        }
+        if !ratio.is_finite() {
+            bail!(
+                "jaw coupling ratio for slave {} must be finite",
+                slave_motor_id
+            );
         }
     }
 
@@ -775,25 +779,22 @@ fn maybe_apply_jaw_coupling_from_master(state: &mut InnerState) {
     apply_jaw_coupling(state, &jaw_coupling);
 }
 
+// Coupling runs in normalized (-1..1) space so a slave's travel stays
+// proportional to the master's across the pair's full range, regardless of
+// how their physical degree spans compare (see MotorChannel::norm_to_applied).
 fn apply_jaw_coupling(state: &mut InnerState, jaw_coupling: &JawCouplingConfig) {
     let master_channel = state.channels[jaw_coupling.master_motor_id].clone();
-    let master_delta =
-        state.target_logical[jaw_coupling.master_motor_id] - master_channel.neutral_logical;
-    let shared_slave_delta = master_delta * jaw_coupling.ratio;
+    let master_norm =
+        master_channel.applied_to_norm(state.target_applied[jaw_coupling.master_motor_id]);
 
-    for slave_motor_id in &jaw_coupling.slave_motor_ids {
-        let direction = jaw_coupling
-            .directions
-            .get(slave_motor_id)
-            .copied()
-            .unwrap_or(1.0);
-        let slave_channel = state.channels[*slave_motor_id].clone();
-        let slave_applied = slave_channel.neutral_applied + shared_slave_delta * direction;
-        // Derive the logical view from the (direction-applied) applied value so
-        // the two stay consistent; computing it independently dropped the
-        // `direction` and made a -1 slave's slider snap back on release.
+    for (&slave_motor_id, &ratio) in &jaw_coupling.slave_ratios {
+        let slave_channel = state.channels[slave_motor_id].clone();
+        let slave_applied = slave_channel.norm_to_applied(master_norm * ratio);
+        // Derive the logical view from the applied value so the two stay
+        // consistent; computing it independently dropped the `direction` and
+        // made a -1 slave's slider snap back on release.
         let slave_logical = slave_applied - slave_channel.offset;
-        apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
+        apply_motor_target_with_applied(state, slave_motor_id, slave_logical, slave_applied);
     }
 }
 
@@ -1032,5 +1033,67 @@ mod tests {
         approx(c.norm_to_applied(1.0), 135.0);
         approx(c.applied_to_norm(135.0), 0.0);
         approx(c.applied_to_norm(60.0), -1.0);
+    }
+
+    fn ch_with_id(
+        id: usize,
+        min_applied: f32,
+        max_applied: f32,
+        neutral_applied: f32,
+    ) -> MotorChannel {
+        MotorChannel {
+            id,
+            ..ch(min_applied, max_applied, neutral_applied)
+        }
+    }
+
+    // Real jaw pair: motor 26 (master) has a 75deg down-span with neutral
+    // pinned at its max; motor 27 (slave) has a 45/30deg asymmetric span
+    // around its own neutral. A degree-based ratio clips the slave before
+    // the master reaches its own limit; norm-space coupling must not.
+    fn jaw_pair_state(jaw_coupling: JawCouplingConfig) -> InnerState {
+        let mut channels: Vec<MotorChannel> = (0..MOTOR_COUNT)
+            .map(|id| ch_with_id(id, 0.0, 1.0, 0.0))
+            .collect();
+        channels[26] = ch_with_id(26, 60.0, 135.0, 135.0);
+        channels[27] = ch_with_id(27, 45.0, 120.0, 75.0);
+
+        let target_applied: Vec<f32> = channels.iter().map(|c| c.neutral_applied).collect();
+        InnerState {
+            frame_seq: 0,
+            target_logical: channels.iter().map(|c| c.neutral_logical).collect(),
+            current_applied: target_applied.clone(),
+            target_applied,
+            channels,
+            jaw_coupling: Some(jaw_coupling),
+            expression_presets: Vec::new(),
+            endpoint: None,
+            last_frame: None,
+        }
+    }
+
+    #[test]
+    fn jaw_coupling_norm_space_avoids_asymmetric_span_clipping() {
+        let jaw_coupling = JawCouplingConfig {
+            master_motor_id: 26,
+            slave_ratios: BTreeMap::from([(27, -1.0)]),
+        };
+        let mut state = jaw_pair_state(jaw_coupling.clone());
+
+        // Master fully closed (its only direction of travel) should carry the
+        // slave to its own limit exactly, not clip early or fall short.
+        state.target_applied[26] = 60.0;
+        apply_jaw_coupling(&mut state, &jaw_coupling);
+        approx(state.target_applied[27], 120.0);
+
+        // Master at neutral -> slave at its own neutral.
+        state.target_applied[26] = 135.0;
+        apply_jaw_coupling(&mut state, &jaw_coupling);
+        approx(state.target_applied[27], 75.0);
+
+        // Master halfway through its travel -> slave halfway through its own.
+        state.target_applied[26] = 97.5;
+        apply_jaw_coupling(&mut state, &jaw_coupling);
+        approx(state.target_applied[27], 97.5);
     }
 }

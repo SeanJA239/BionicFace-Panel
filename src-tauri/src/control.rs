@@ -760,11 +760,12 @@ fn maybe_apply_jaw_coupling(state: &mut InnerState, updated_motor_id: usize) {
     let Some(jaw_coupling) = state.jaw_coupling.clone() else {
         return;
     };
-    if updated_motor_id != jaw_coupling.master_motor_id {
-        maybe_sync_jaw_slaves(state, updated_motor_id, &jaw_coupling);
-        return;
+    // One-way coupling: only the master drives the slaves. Dragging a slave
+    // moves it alone (it is already set by apply_motor_target), so a
+    // misaligned slave can be fine-tuned without disturbing the master.
+    if updated_motor_id == jaw_coupling.master_motor_id {
+        apply_jaw_coupling(state, &jaw_coupling);
     }
-    apply_jaw_coupling(state, &jaw_coupling);
 }
 
 fn maybe_apply_jaw_coupling_from_master(state: &mut InnerState) {
@@ -794,43 +795,6 @@ fn apply_jaw_coupling(state: &mut InnerState, jaw_coupling: &JawCouplingConfig) 
         let slave_logical = slave_applied - slave_channel.offset;
         apply_motor_target_with_applied(state, *slave_motor_id, slave_logical, slave_applied);
     }
-}
-
-fn maybe_sync_jaw_slaves(
-    state: &mut InnerState,
-    updated_motor_id: usize,
-    jaw_coupling: &JawCouplingConfig,
-) {
-    if !jaw_coupling.slave_motor_ids.contains(&updated_motor_id) {
-        return;
-    }
-
-    // Back-solve the master delta from the dragged slave's applied position,
-    // then re-drive the master and every slave so the whole group stays on one
-    // coupling curve. The old code re-applied the slave's own `direction` to
-    // itself, which inverted the drag and pinned the slave against a limit.
-    let direction = jaw_coupling
-        .directions
-        .get(&updated_motor_id)
-        .copied()
-        .unwrap_or(1.0);
-    let denom = jaw_coupling.ratio * direction;
-    if denom.abs() <= f32::EPSILON {
-        return;
-    }
-    let source_channel = state.channels[updated_motor_id].clone();
-    let master_delta =
-        (state.target_applied[updated_motor_id] - source_channel.neutral_applied) / denom;
-
-    let master_id = jaw_coupling.master_motor_id;
-    let master_channel = state.channels[master_id].clone();
-    apply_motor_target_with_applied(
-        state,
-        master_id,
-        master_channel.neutral_logical + master_delta,
-        master_channel.neutral_applied + master_delta,
-    );
-    apply_jaw_coupling(state, jaw_coupling);
 }
 
 fn build_runtime_state(state: &InnerState) -> RuntimeState {

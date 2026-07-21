@@ -114,11 +114,11 @@ applied = clamp(logical + offset, minApplied, maxApplied)
 
 ## 下巴联动
 
-下巴的三个通道不是完全独立的：motor 25（`jaw_right_upper`）是主升轴，26（`jaw_right_lower`）和 27（`jaw_left`）跟随联动。
+下巴通道有主从联动：当前配置 motor 26（`jaw_right_lower`）为主动，27（`jaw_left`）跟随。
 
-- 26、27 相对各自中位的补偿量 = 25 相对中位的偏移量 × `ratio`
-- 每个从动通道有独立的 `direction`（+1 跟随，-1 相反）；当前配置 26 为 `+1`，27 为 `-1`
-- 无论是拖动 25，还是直接拖动 26/27 中的任意一个，都会重新计算并同步其余联动通道
+- 从动相对自身中位的补偿量 = 主动相对中位的偏移量 × `ratio`
+- 每个从动有独立的 `direction`（+1 跟随，-1 相反）；当前 27 为 `-1`（镜像）
+- **单向联动**：只有拖动主动通道才驱动从动；直接拖从动通道时它单独运动、不牵连主动，方便对不准时单独微调从动
 - 应用表情预设时不触发联动重算——预设的 32 个角度本身就是"已经算好联动"的最终值
 
 配置项在 [raspi/config.py](raspi/config.py) 的 `JAW_COUPLING` 里：`master_motor_id`、`slave_motor_ids`、`ratio`、`directions`。

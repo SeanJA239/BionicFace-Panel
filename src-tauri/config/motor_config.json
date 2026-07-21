@@ -424,8 +424,8 @@
       "offset": 0.0,
       "minLogical": 45.0,
       "maxLogical": 120.0,
-      "neutralApplied": 45.0,
-      "neutralLogical": 45.0,
+      "neutralApplied": 75.0,
+      "neutralLogical": 75.0,
       "enabled": true
     },
     {

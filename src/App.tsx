@@ -42,6 +42,7 @@ type SliderRowProps = {
   channel: MotorChannel;
   logicalValue: number;
   appliedValue: number;
+  normValue: number;
   onChange: (motorId: number, value: number) => void;
 };
 
@@ -49,6 +50,7 @@ const SliderRow = memo(function SliderRow({
   channel,
   logicalValue,
   appliedValue,
+  normValue,
   onChange,
 }: SliderRowProps) {
   return (
@@ -76,6 +78,7 @@ const SliderRow = memo(function SliderRow({
       <div className="value-pair">
         <span>L {logicalValue.toFixed(1)}</span>
         <span>A {appliedValue.toFixed(1)}</span>
+        <span>N {normValue.toFixed(2)}</span>
       </div>
     </label>
   );
@@ -318,6 +321,7 @@ function App() {
                 channel={channel}
                 logicalValue={runtime.targetLogical[channel.id] ?? channel.neutralLogical}
                 appliedValue={runtime.currentApplied[channel.id] ?? channel.neutralApplied}
+                normValue={runtime.currentNorm[channel.id] ?? 0}
                 onChange={handleSliderChange}
               />
             ))}

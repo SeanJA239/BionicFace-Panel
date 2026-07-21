@@ -118,7 +118,7 @@ MOTOR_LIMITS = {
     24: (60, 120),  # 90-zero-r
     25: (75, 110),
     26: (60, 135),
-    27: (60, 135),
+    27: (45, 120),
     28: (75, 105),  # 90-mid-r
     29: (75, 105),
     # Neck structure is back in service but not yet calibrated end-to-end;

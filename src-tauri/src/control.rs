@@ -26,7 +26,10 @@ const CONFIG_PATH: &str = "config/motor_config.json";
 // conservative neck limits, so a nod is ~±15 deg around neutral.
 const NECK_UP_MOTOR: usize = 30;
 const NECK_MIRROR_MOTOR: usize = 31;
-const NOD_AMPLITUDE_DEG: f32 = 15.0;
+// Neck motors 30/31 are symmetric (75..105, neutral 90), so a full ±1 norm
+// swing reproduces the original ±15deg nod exactly, and stays proportional if
+// the safety limits are ever recalibrated.
+const NOD_AMPLITUDE_NORM: f32 = 1.0;
 const NOD_CYCLES: usize = 2;
 const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
 
@@ -141,7 +144,9 @@ struct JawCouplingConfig {
 pub struct ExpressionPreset {
     pub id: String,
     pub label: String,
-    pub angles: Vec<f32>,
+    // Bipolar normalized (-1..1) target per channel, so a preset baked at one
+    // calibration still lands at the same relative pose after recalibration.
+    pub norm: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,26 +468,20 @@ impl ControlService {
             .cloned()
             .ok_or_else(|| anyhow!("expression preset not found: {preset_id}"))?;
 
-        for (motor_id, applied_value) in preset.angles.iter().copied().enumerate() {
-            let channel = state.channels[motor_id].clone();
-            let applied_value = applied_value.clamp(channel.min_applied, channel.max_applied);
-            let logical_value = channel.normalized_logical(applied_value - channel.offset);
-            apply_motor_target_with_applied(&mut state, motor_id, logical_value, applied_value);
+        for (motor_id, norm_value) in preset.norm.iter().copied().enumerate() {
+            apply_motor_target_norm(&mut state, motor_id, norm_value);
         }
 
         Ok(build_runtime_state(&state))
     }
 
-    async fn set_neck_targets(&self, applied_up_motor: f32, applied_mirror_motor: f32) {
+    async fn set_neck_targets(&self, norm_up_motor: f32, norm_mirror_motor: f32) {
         let mut state = self.state.lock().await;
-        for (motor_id, applied) in [
-            (NECK_UP_MOTOR, applied_up_motor),
-            (NECK_MIRROR_MOTOR, applied_mirror_motor),
+        for (motor_id, norm) in [
+            (NECK_UP_MOTOR, norm_up_motor),
+            (NECK_MIRROR_MOTOR, norm_mirror_motor),
         ] {
-            let channel = state.channels[motor_id].clone();
-            let applied = applied.clamp(channel.min_applied, channel.max_applied);
-            let logical = channel.normalized_logical(applied - channel.offset);
-            apply_motor_target_with_applied(&mut state, motor_id, logical, applied);
+            apply_motor_target_norm(&mut state, motor_id, norm);
         }
     }
 
@@ -498,16 +497,9 @@ impl ControlService {
     /// cycles, then return to neutral. Targets are set over time and the
     /// heartbeat interpolates + dispatches them.
     pub async fn nod(&self) -> Result<RuntimeState> {
-        let (neutral_up, neutral_mirror) = {
-            let state = self.state.lock().await;
-            (
-                state.channels[NECK_UP_MOTOR].neutral_applied,
-                state.channels[NECK_MIRROR_MOTOR].neutral_applied,
-            )
-        };
         // "Up" lifts motor 30 by increasing its angle; motor 31 mirrors it.
-        let up = (neutral_up + NOD_AMPLITUDE_DEG, neutral_mirror - NOD_AMPLITUDE_DEG);
-        let down = (neutral_up - NOD_AMPLITUDE_DEG, neutral_mirror + NOD_AMPLITUDE_DEG);
+        let up = (NOD_AMPLITUDE_NORM, -NOD_AMPLITUDE_NORM);
+        let down = (-NOD_AMPLITUDE_NORM, NOD_AMPLITUDE_NORM);
 
         for _ in 0..NOD_CYCLES {
             self.set_neck_targets(up.0, up.1).await;
@@ -515,7 +507,7 @@ impl ControlService {
             self.set_neck_targets(down.0, down.1).await;
             tokio::time::sleep(NOD_PHASE_DWELL).await;
         }
-        self.set_neck_targets(neutral_up, neutral_mirror).await;
+        self.set_neck_targets(0.0, 0.0).await;
         tokio::time::sleep(NOD_PHASE_DWELL).await;
 
         Ok(self.runtime_state().await)
@@ -714,9 +706,9 @@ fn normalize_expression_presets(
         if preset.label.trim().is_empty() {
             bail!("expression preset label cannot be empty");
         }
-        if preset.angles.len() != MOTOR_COUNT {
+        if preset.norm.len() != MOTOR_COUNT {
             bail!(
-                "expression preset '{}' must contain exactly {} angles",
+                "expression preset '{}' must contain exactly {} norm values",
                 preset.id,
                 MOTOR_COUNT
             );

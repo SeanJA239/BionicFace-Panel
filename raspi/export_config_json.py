@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "raspi" / "config.py"
 OUTPUT_PATH = ROOT / "src-tauri" / "config" / "motor_config.json"
-EMOTION_PATH = ROOT / "emotion.md"
+PRESETS_PATH = ROOT / "presets.json"
 
 
 def load_module(path: Path):
@@ -60,6 +59,11 @@ def build_channel(module, motor_id: int) -> dict:
 
 
 def build_jaw_coupling(module) -> dict | None:
+    """control.rs's JawCouplingConfig (norm-space jaw coupling) takes one
+    signed ratio per slave: slave_norm = master_norm * slave_ratios[slave].
+    config.py's JAW_COUPLING still separates that into a shared `ratio`
+    magnitude plus a per-slave `directions` sign, so combine them here.
+    """
     coupling = getattr(module, "JAW_COUPLING", None)
     if not coupling:
         return None
@@ -69,46 +73,40 @@ def build_jaw_coupling(module) -> dict | None:
     ratio = float(coupling.get("ratio", 1.0))
     raw_directions = coupling.get("directions", {})
 
-    directions = {}
+    slave_ratios = {}
     for motor_id in slave_motor_ids:
-        directions[str(motor_id)] = float(raw_directions.get(motor_id, 1.0))
+        direction = float(raw_directions.get(motor_id, 1.0))
+        slave_ratios[str(motor_id)] = ratio * direction
 
     return {
         "masterMotorId": master_motor_id,
-        "slaveMotorIds": slave_motor_ids,
-        "ratio": ratio,
-        "directions": directions,
+        "slaveRatios": slave_ratios,
     }
 
 
-def parse_expression_presets(path: Path) -> list[dict]:
+def load_expression_presets(path: Path) -> list[dict]:
+    """Load presets.json: each preset stores a bipolar normalized (-1..1)
+    coefficient per channel (see raspi/migrate_presets_to_normalized.py),
+    calibration-independent by construction, so no MOTOR_LIMITS/offset
+    lookup is needed here.
+    """
     if not path.exists():
         return []
 
-    raw = path.read_text(encoding="utf-8")
-    matches = list(re.finditer(r"^\s*(.+?)\s*[:：]\s*$", raw, re.MULTILINE))
+    raw = json.loads(path.read_text(encoding="utf-8"))
     presets: list[dict] = []
-
-    for index, match in enumerate(matches):
-        label = match.group(1).strip()
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
-        block = raw[start:end]
-        numbers = [
-            float(value)
-            for value in re.findall(r"-?\d+(?:\.\d+)?", block)
-        ]
-        if len(numbers) != 32:
+    for entry in raw.get("presets", []):
+        preset_id = str(entry["id"])
+        label = str(entry["label"])
+        norm = [float(value) for value in entry["norm"]]
+        if len(norm) != 32:
             raise RuntimeError(
-                f"Expression preset '{label}' must contain exactly 32 angles, got {len(numbers)}"
+                f"Expression preset '{preset_id}' must contain exactly 32 norm values, got {len(norm)}"
             )
-        presets.append(
-            {
-                "id": label,
-                "label": label,
-                "angles": numbers,
-            }
-        )
+        clamped = [clamp(value, -1.0, 1.0) for value in norm]
+        if clamped != norm:
+            print(f"WARNING: preset '{preset_id}' had out-of-range norm values, clamped to [-1, 1]")
+        presets.append({"id": preset_id, "label": label, "norm": clamped})
 
     return presets
 
@@ -127,7 +125,7 @@ def main() -> None:
         },
         "channels": channels,
         "jawCoupling": build_jaw_coupling(module),
-        "expressionPresets": parse_expression_presets(EMOTION_PATH),
+        "expressionPresets": load_expression_presets(PRESETS_PATH),
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

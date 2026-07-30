@@ -475,6 +475,44 @@ impl ControlService {
         Ok(build_runtime_state(&state))
     }
 
+    /// Apply a preset scaled towards the `rest` preset's own norm vector
+    /// (or towards 0 per channel if there is no `rest` preset), instead of
+    /// scaling towards each channel's calibrated neutral (norm 0). The two
+    /// are not the same: `rest`'s per-channel norm values are themselves
+    /// mostly non-zero (see README's "表情预设系统"), so `intensity=0` lands
+    /// on the declared rest pose rather than each motor's independent
+    /// calibration midpoint.
+    pub async fn apply_expression_preset_scaled(
+        &self,
+        preset_id: &str,
+        intensity: f32,
+    ) -> Result<RuntimeState> {
+        let mut state = self.state.lock().await;
+        let preset = state
+            .expression_presets
+            .iter()
+            .find(|preset| preset.id == preset_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("expression preset not found: {preset_id}"))?;
+        let neutral_norm = state
+            .expression_presets
+            .iter()
+            .find(|preset| preset.id == "rest")
+            .map(|preset| preset.norm.clone());
+
+        let intensity = intensity.clamp(0.0, 1.0);
+        for (motor_id, target_norm) in preset.norm.iter().copied().enumerate() {
+            let neutral = neutral_norm
+                .as_ref()
+                .map(|norm| norm[motor_id])
+                .unwrap_or(0.0);
+            let scaled = neutral + intensity * (target_norm - neutral);
+            apply_motor_target_norm(&mut state, motor_id, scaled);
+        }
+
+        Ok(build_runtime_state(&state))
+    }
+
     async fn set_neck_targets(&self, norm_up_motor: f32, norm_mirror_motor: f32) {
         let mut state = self.state.lock().await;
         for (motor_id, norm) in [
@@ -597,6 +635,16 @@ impl AppState {
 
     pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
         self.service.apply_expression_preset(preset_id).await
+    }
+
+    pub async fn apply_expression_preset_scaled(
+        &self,
+        preset_id: &str,
+        intensity: f32,
+    ) -> Result<RuntimeState> {
+        self.service
+            .apply_expression_preset_scaled(preset_id, intensity)
+            .await
     }
 
     pub async fn nod(&self) -> Result<RuntimeState> {

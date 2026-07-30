@@ -100,6 +100,13 @@ export async function applyExpressionPreset(presetId: string): Promise<RuntimeSt
   return safeInvoke("apply_expression_preset", { presetId });
 }
 
+export async function applyExpressionPresetScaled(
+  presetId: string,
+  intensity: number,
+): Promise<RuntimeState> {
+  return safeInvoke("apply_expression_preset_scaled", { presetId, intensity });
+}
+
 export async function nod(): Promise<RuntimeState> {
   return safeInvoke("nod");
 }

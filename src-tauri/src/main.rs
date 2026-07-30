@@ -105,6 +105,18 @@ async fn apply_expression_preset(
 }
 
 #[tauri::command]
+async fn apply_expression_preset_scaled(
+    state: State<'_, Arc<AppState>>,
+    preset_id: String,
+    intensity: f32,
+) -> Result<RuntimeState, String> {
+    state
+        .apply_expression_preset_scaled(&preset_id, intensity)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn nod(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     state.nod().await.map_err(|err| err.to_string())
 }
@@ -177,6 +189,7 @@ pub fn run() {
             set_all_targets_norm,
             center_all,
             apply_expression_preset,
+            apply_expression_preset_scaled,
             nod,
             wink,
             get_runtime_state,

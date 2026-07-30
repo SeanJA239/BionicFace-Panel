@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
-  applyExpressionPreset,
+  applyExpressionPresetScaled,
   centerAll,
   connectPi,
   disconnectPi,
@@ -93,6 +93,7 @@ function App() {
   const [status, setStatus] = useState("Loading config...");
   const [connected, setConnected] = useState(false);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [presetIntensity, setPresetIntensity] = useState(1.0);
   const pendingSendsRef = useRef(new Map<number, number>());
   const sendTimerRef = useRef<number | null>(null);
 
@@ -241,12 +242,12 @@ function App() {
     };
   }, []);
 
-  async function handleApplyPreset(preset: ExpressionPresetSummary) {
+  async function handleApplyPreset(preset: ExpressionPresetSummary, intensity: number) {
     try {
-      const next = await applyExpressionPreset(preset.id);
+      const next = await applyExpressionPresetScaled(preset.id, intensity);
       setRuntime(next);
       setActivePresetId(preset.id);
-      setStatus(`Expression preset applied: ${preset.label}`);
+      setStatus(`Expression preset applied: ${preset.label} @ ${intensity.toFixed(2)}`);
     } catch (error) {
       setStatus(String(error));
     }
@@ -285,17 +286,32 @@ function App() {
             </button>
           </div>
           {expressionPresets.length > 0 ? (
-            <div className="button-row">
-              {expressionPresets.map((preset) => (
-                <button
-                  className={activePresetId === preset.id ? "" : "secondary"}
-                  key={preset.id}
-                  onClick={() => (preset.id === "wink" ? handleWink() : handleApplyPreset(preset))}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
+            <>
+              <label className="endpoint-field">
+                <span>Preset intensity ({presetIntensity.toFixed(2)})</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={presetIntensity}
+                  onChange={(event) => setPresetIntensity(Number(event.target.value))}
+                />
+              </label>
+              <div className="button-row">
+                {expressionPresets.map((preset) => (
+                  <button
+                    className={activePresetId === preset.id ? "" : "secondary"}
+                    key={preset.id}
+                    onClick={() =>
+                      preset.id === "wink" ? handleWink() : handleApplyPreset(preset, presetIntensity)
+                    }
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </>
           ) : null}
           <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
           <p className="status-line muted">{status}</p>

@@ -91,15 +91,15 @@ React 滑条 --invoke--> Rust ControlService --UDP JSON--> Raspberry Pi --I2C-->
 - `DISABLED_MOTORS`
 - `JAW_COUPLING`（下巴联动参数）
 
-表情预设数据来自 [emotion.md](emotion.md)，导出脚本会把里面每个表情的 32 通道应用角度打包进配置 JSON。
+表情预设数据来自 [presets.json](presets.json)，导出脚本把里面每个表情的 32 通道归一化系数原样打包进配置 JSON（见下方"表情预设系统"）。
 
-Rust 不直接解析 Python，修改配置或 `emotion.md` 后需要重新导出：
+Rust 不直接解析 Python，修改配置或 `presets.json` 后需要重新导出：
 
 ```bash
 python3 raspi/export_config_json.py
 ```
 
-导出结果写入 [src-tauri/config/motor_config.json](src-tauri/config/motor_config.json)，Rust 启动时读取。**改完 `config.py` 或 `emotion.md` 忘记导出是最常见的配置不生效原因。**
+导出结果写入 [src-tauri/config/motor_config.json](src-tauri/config/motor_config.json)，Rust 启动时读取。**改完 `config.py` 或 `presets.json` 忘记导出是最常见的配置不生效原因。**
 
 ## 逻辑角度与物理角度
 
@@ -127,11 +127,21 @@ applied = clamp(logical + offset, minApplied, maxApplied)
 
 常用表情（喜悦、悲伤、愤怒、惊讶、恐惧、厌恶等）不需要每次手动摆 32 个滑条，预设系统把这些角度固化下来：
 
-- 预设数据源是 [emotion.md](emotion.md)，每个表情一段 32 个应用角度
-- 导出脚本把 `emotion.md` 解析进 `motor_config.json` 的 `expressionPresets` 字段
-- Rust 端提供 `list_expression_presets`（返回 id/label 列表）和 `apply_expression_preset`（按 id 应用，内部会做和滑条一致的 `clamp` 校验）两个 Tauri 命令
-- 前端在顶部渲染一排预设按钮，点击即把全部 32 通道设置为该表情的目标角度，并高亮当前生效的预设
-- 手动拖动任意滑条会清除"当前预设"高亮，因为已经偏离了预设值
+- 预设的规范存储形式是 **[presets.json](presets.json)**：每个表情是 `{id, label, norm}`，`norm` 是 32 个**双极归一化系数（-1..1）**，语义与 `control.rs` 里 `MotorChannel::norm_to_applied`/`applied_to_norm` 完全一致——以该通道**校准后的中位（neutral_applied）**为锚点，`0` 是中位，`+1`/`-1` 分别是该通道限位的上/下端点。这样一个预设不管标定端点之后怎么改，换算出来的姿态相对位置不变。
+- 历史数据 [emotion.legacy.md](emotion.legacy.md) 保留作参考，里面是旧的 32 通道原始物理角度（`applied`），**不再参与导出**。一次性迁移脚本 [raspi/migrate_presets_to_normalized.py](raspi/migrate_presets_to_normalized.py) 把它按当前 `config.py` 标定换算成 `presets.json`；超出 `MOTOR_LIMITS` 的角度会被钳位并打印警告。`DISABLED_MOTORS` 对应位置写 `0.0`（该通道自身的归一化中位），应用时会被 `apply_motor_target_norm` 的 `!enabled` 分支忽略。
+- 导出脚本 [raspi/export_config_json.py](raspi/export_config_json.py) 直接读取 `presets.json` 并原样（钳位到 `[-1, 1]`）打包进 `motor_config.json` 的 `expressionPresets` 字段——因为系数已经是标定无关的，这一步不需要再查 `MOTOR_LIMITS`/`MOTOR_OFFSET`。
+- Rust 端提供三个 Tauri 命令：`list_expression_presets`（返回 id/label 列表）、`apply_expression_preset`（按 id 应用，内部经 `apply_motor_target_norm` 做和滑条一致的换算与钳位）、`apply_expression_preset_scaled(presetId, intensity)`（按强度缩放应用，见下）。
+- 前端在顶部渲染一个强度滑杆（默认 1.0）和一排预设按钮，点击按钮把全部 32 通道设置为"按当前强度缩放"后的该表情目标，并高亮当前生效的预设。手动拖动任意滑条会清除"当前预设"高亮，因为已经偏离了预设值。
+
+**强度缩放语义**：`apply_expression_preset_scaled` 不是把系数往每个通道的校准中位（`norm=0`）缩放，而是往 **`rest` 预设自身的系数向量**缩放（若没有 `rest` 预设则退化为往 `0` 缩放）：
+
+```text
+c' = c_rest + intensity * (c - c_rest)   // 按通道
+```
+
+原因：`rest`（静息）预设的 32 个系数本身大多不是 `0`——静息姿态和每个电机独立标定出来的物理中位并不是一回事（例如 `eyebrow_right_inner` 的 `rest` 系数是 `-0.25` 而不是 `0`）。如果把强度缩放锚定在 `norm=0`，`intensity=0` 会让脸回到一堆互不相关的电机中位，而不是回到静息表情；锚定在 `rest` 的系数向量上，`intensity=0` 才真正回到静息脸，`intensity=1` 是完整表情，中间是两者的线性插值。
+
+> **与本任务文档原始描述的差异**：文档最初设想的是单极 `[0, 1]` 系数 `coefficient = (applied - min_applied) / (max_applied - min_applied)`。仓库在此之前的"norm"系列提交（见 `git log`）已经实现并全面接入了一套双极 `[-1, 1]`、以校准中位为锚点、两侧跨度可不对称的归一化方案，贯穿滑条、下巴联动、点头动作。按仓库现状优先的约定，本次迁移复用了这套已有方案而不是另起一套不兼容的单极系数，`DISABLED_MOTORS` 的占位值相应从文档里的 `0.5` 改为 `0.0`（该方案里的"中位"就是 `0`）。
 
 ## 通道禁用与脖子电机
 
@@ -144,7 +154,7 @@ applied = clamp(logical + offset, minApplied, maxApplied)
 
 ## 工作流
 
-1. 修改 [raspi/config.py](raspi/config.py)（标定/联动/禁用）或 [emotion.md](emotion.md)（表情预设）
+1. 修改 [raspi/config.py](raspi/config.py)（标定/联动/禁用）或 [presets.json](presets.json)（表情预设，32 个 `-1..1` 归一化系数）
 2. 运行 `python3 raspi/export_config_json.py`
 3. 树莓派上启动执行器：`python3 raspi/servo_server.py`
 4. 上位机启动面板：`npm run tauri dev`
@@ -158,8 +168,10 @@ applied = clamp(logical + offset, minApplied, maxApplied)
 | 文件 | 作用 |
 |---|---|
 | [raspi/config.py](raspi/config.py) | 硬件标定源（唯一真实来源，含限位、联动、禁用配置） |
-| [emotion.md](emotion.md) | 表情预设数据源 |
-| [raspi/export_config_json.py](raspi/export_config_json.py) | 配置导出脚本（Python + emotion.md → Rust JSON） |
+| [presets.json](presets.json) | 表情预设数据源（32 通道归一化系数，标定无关） |
+| [emotion.legacy.md](emotion.legacy.md) | 迁移前的原始物理角度预设，仅供参考，不参与导出 |
+| [raspi/migrate_presets_to_normalized.py](raspi/migrate_presets_to_normalized.py) | 一次性迁移脚本：`emotion.legacy.md` 角度 → `presets.json` 系数 |
+| [raspi/export_config_json.py](raspi/export_config_json.py) | 配置导出脚本（Python + presets.json → Rust JSON） |
 | [raspi/servo_server.py](raspi/servo_server.py) | 树莓派 UDP 执行器 |
 | [src-tauri/src/control.rs](src-tauri/src/control.rs) | Rust 控制核心（补偿、插值、联动、预设、心跳、日志） |
 | [src/App.tsx](src/App.tsx) | 前端控制台 UI |

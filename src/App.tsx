@@ -16,6 +16,7 @@ import {
   listSequences,
   nod,
   playSequence,
+  setIdleBehaviorEnabled,
   setMotorTarget,
   stopSequence,
   wink,
@@ -49,7 +50,19 @@ function fallbackRuntime(): RuntimeState {
     targetNorm: Array(MOTOR_COUNT).fill(0),
     currentNorm: Array(MOTOR_COUNT).fill(0),
     controlSource: "manual",
+    idleBehaviorEnabled: true,
   };
+}
+
+function controlSourceLabel(source: RuntimeState["controlSource"]): string {
+  switch (source) {
+    case "external":
+      return "External";
+    case "idle":
+      return "Idle";
+    default:
+      return "Manual";
+  }
 }
 
 type SliderRowProps = {
@@ -190,6 +203,16 @@ function App() {
       await playSequence(sequence.id);
       setActivePresetId(null);
       setStatus(`Playing sequence: ${sequence.label}`);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function handleToggleIdleBehavior() {
+    try {
+      const next = await setIdleBehaviorEnabled(!runtime.idleBehaviorEnabled);
+      setRuntime(next);
+      setStatus(`Idle behavior ${next.idleBehaviorEnabled ? "enabled" : "disabled"}`);
     } catch (error) {
       setStatus(String(error));
     }
@@ -431,11 +454,21 @@ function App() {
           ) : null}
           <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
           <p className="status-line">
-            Control source: <strong>{isExternal ? "External" : "Manual"}</strong>
+            Control source: <strong>{controlSourceLabel(runtime.controlSource)}</strong>
             {isExternal && externalStatus
               ? ` (port ${externalStatus.port}, ${externalStatus.fps.toFixed(1)} fps, seq ${externalStatus.lastSeq ?? "-"})`
               : null}
           </p>
+          <label className="endpoint-field">
+            <span>
+              <input
+                type="checkbox"
+                checked={runtime.idleBehaviorEnabled}
+                onChange={handleToggleIdleBehavior}
+              />{" "}
+              Idle noise + blink
+            </span>
+          </label>
           <p className="status-line muted">{status}</p>
         </div>
       </section>

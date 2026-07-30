@@ -44,6 +44,7 @@ React 滑条 --invoke--> Rust ControlService --UDP JSON--> Raspberry Pi --I2C-->
 - 通过 UDP JSON 把 32 通道最终角度发往树莓派（心跳与手动 flush 共用一个 socket）
 - 记录发送日志（JSONL + CSV 双份），只记录运动帧，停稳或每秒批量刷盘一次，减少 SD 卡写入
 - 监听独立的外部系数输入端口（默认 6100），和 Manual 来源仲裁出唯一当前控制源（详见"控制源仲裁与外部输入"）
+- Manual 静止超过阈值后自动进入待机噪声/眨眼调度（详见"待机噪声与眨眼调度器"）
 
 ### 树莓派执行器（[raspi/servo_server.py](raspi/servo_server.py)）
 
@@ -164,7 +165,7 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 - **配置**：`raspi/config.py` 的 `EXTERNAL_INPUT_PORT` / `EXTERNAL_INPUT_TIMEOUT_MS`，导出后进入 `motor_config.json` 的 `externalInput` 字段；缺省时 Rust 侧回退到 `6100`/`500ms`。
 - **Tauri 命令**：`get_external_input_status`（端口、是否 active、最近 seq、EMA 帧率、超时配置）、`force_manual_control`（立即切回 Manual）。前端每 300ms 轮询一次 `get_runtime_state` + `get_external_input_status`，用于顶部"Control source"状态展示和控件置灰，即使用户没有手动操作也能实时感知外部驱动的接入/断开。
 
-> 三态仲裁里预留了第三个源 `Idle`（Manual 且长时间静止，触发待机噪声/眨眼），但目前只接入了 `Manual`/`External`——`Idle` 的判定条件依赖尚不存在的序列播放器与待机调度器，会在那两个任务落地时再扩展 `ControlSource` 枚举，这里不提前定义用不到的状态。
+> 三态仲裁的第三个源 `Idle`（Manual 且长时间静止，触发待机噪声/眨眼）由"待机噪声与眨眼调度器"一节接入，判定条件依赖序列播放器（是否有序列在播）与待机调度器本身，具体规则见该节。
 
 ## 缓动与表情序列播放
 
@@ -189,6 +190,15 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
   仓库自带两个演示序列：[demo_1.json](src-tauri/sequences/demo_1.json)（中性→惊讶→喜悦→回中性）、[demo_wink_loop.json](src-tauri/sequences/demo_wink_loop.json)（循环眨眼）。`preset` 字段引用的是 `presets.json` 里的表情 id（本仓库是中文标签如 `"惊讶"`/`"喜悦"`/`"wink"`/`"rest"`，不是任务文档示例里的英文 id `"surprise"`/`"happy"`——照仓库现状为准）。
 - **播放器**：Rust 端在心跳循环里驱动，每步先启动该步骤的缓动过渡（复用预设强度缩放逻辑），等待 `transition_ms + hold_ms` 后进入下一步；`loop: true` 时播完最后一步回到第一步继续。Tauri 命令：`list_sequences`、`play_sequence(sequenceId)`、`stop_sequence`、`get_sequence_playback_status`（当前序列/步骤索引/总步数）。
 - **抢占规则**：任何手动写操作（拖滑条、点预设、`center_all`、`nod`、`wink`）都会立刻清掉正在跑的缓动过渡和序列播放，目标保持在被打断那一刻的值——不会先播完当前步骤再让位。External 源激活时序列无法开始播放（`play_sequence` 会像其它手动命令一样返回错误）。前端每 300ms 轮询播放状态，播放中的序列按钮高亮，并显示"当前步骤/总步骤"。
+
+## 待机噪声与眨眼调度器
+
+`control_source` 仲裁的第三态 `Idle` 在这里接入：当控制源是 `Manual`、没有序列在播放、也没有正在跑的缓动过渡，且目标已经静止超过 `idle_after_seconds`（默认 `3s`）时，自动进入 `Idle`；一旦有任何手动写操作（拖滑条、点预设、`center_all`/`nod`/`wink`、开始播放序列）或外部系数流接入，立刻退出 `Idle` 回到 `Manual`/`External`，目标保持在被打断那一刻的值。
+
+- **待机噪声**：进入 `Idle` 那一刻的 32 通道目标被当作"基准姿态"快照下来；配置的通道子集（默认眉毛 `0-3`、眼球 `8`/`13`、脖子 `30`/`31`）在各自的归一化系数空间上叠加一个平滑随机游走——每隔一个随机周期（由 `noiseFreqMinHz`~`noiseFreqMaxHz`，默认 `0.2~0.5Hz` 换算出的周期区间）重新挑一个 `[-noiseAmplitude, noiseAmplitude]`（默认 `±0.03`）范围内的随机目标，当前噪声值再按固定平滑系数向那个随机目标指数逼近，而不是每次瞬间跳变。叠加结果重新钳位后照常走限速插值。
+- **眨眼**：随机间隔 `blinkMinIntervalSeconds`~`blinkMaxIntervalSeconds`（默认 `2~6s`）触发一次，固定作用于眼睑通道 `9`/`10`/`11`/`12`：闭合 `80ms` → 保持 `60ms` → 打开 `120ms`（打开目标是眨眼开始前的基准姿态，不是固定的"全开"值），闭合/打开都用 `ease_in_out_cubic` 复用缓动层实现。眨眼期间该通道暂停噪声叠加。**"闭合"对应哪个方向的物理极限尚未经硬件验证**（约定与 `tools/face_visualizer.py` 的眼睑覆盖度一致：归一化系数 `+1` = 闭合），标了 TODO 留给硬件联调。
+- **配置**：集中在 `raspi/config.py` 的 `IDLE_BEHAVIOR` 字典，导出进 `motor_config.json` 的 `idleBehavior` 字段（每个键都有默认值，缺失也能正常加载）。运行时还有一个独立于配置文件的**总开关**：Tauri 命令 `set_idle_behavior_enabled(enabled)`，前端顶部有对应的勾选框；关闭时如果正处于 `Idle` 会立即退回 `Manual`。
+- External 源激活时待机行为完全不生效（`Idle` 只能从 `Manual` 进入，`External` 会话期间连判定条件都不会检查）。
 
 ## 通道禁用与脖子电机
 

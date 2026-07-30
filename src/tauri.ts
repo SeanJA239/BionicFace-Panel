@@ -22,7 +22,7 @@ export type TransportStatus = {
   heartbeatHz: number;
 };
 
-export type ControlSource = "manual" | "external";
+export type ControlSource = "manual" | "external" | "idle";
 
 export type RuntimeState = {
   endpoint: string | null;
@@ -35,6 +35,7 @@ export type RuntimeState = {
   targetNorm: number[];
   currentNorm: number[];
   controlSource: ControlSource;
+  idleBehaviorEnabled: boolean;
 };
 
 export type ExternalInputStatus = {
@@ -168,6 +169,10 @@ export async function getExternalInputStatus(): Promise<ExternalInputStatus> {
 
 export async function forceManualControl(): Promise<RuntimeState> {
   return safeInvoke("force_manual_control");
+}
+
+export async function setIdleBehaviorEnabled(enabled: boolean): Promise<RuntimeState> {
+  return safeInvoke("set_idle_behavior_enabled", { enabled });
 }
 
 export async function getLastFrame(): Promise<UdpControlFrame | null> {

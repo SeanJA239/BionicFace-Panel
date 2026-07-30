@@ -18,6 +18,21 @@ UDP_PORT = 6000
 EXTERNAL_INPUT_PORT = 6100
 EXTERNAL_INPUT_TIMEOUT_MS = 500
 
+# Idle behavior (see control.rs's ControlSource::Idle): when Manual and
+# stationary for idle_after_seconds with nothing else animating, low-amplitude
+# noise is added on the listed channels (in their own norm space) plus
+# periodic blinking on the eyelid channels (9/10/11/12, not configurable here).
+IDLE_BEHAVIOR = {
+    "enabled": True,
+    "idle_after_seconds": 3.0,
+    "noise_channel_ids": [0, 1, 2, 3, 8, 13, 30, 31],
+    "noise_amplitude": 0.03,
+    "noise_freq_min_hz": 0.2,
+    "noise_freq_max_hz": 0.5,
+    "blink_min_interval_seconds": 2.0,
+    "blink_max_interval_seconds": 6.0,
+}
+
 MOTOR_NAMES = {
     0: "eyebrow_right_inner",
     1: "eyebrow_right_outer",

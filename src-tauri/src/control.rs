@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -49,6 +51,21 @@ const WINK_PRESET_ID: &str = "wink";
 const DEFAULT_PRESET_TRANSITION: Duration = Duration::from_millis(600);
 const DEFAULT_PRESET_EASING: EasingKind = EasingKind::MinJerk;
 const SEQUENCES_DIR: &str = "sequences";
+
+// Idle blink: quick close/hold/open on the eyelid channels. Fixed durations
+// per spec (not part of IdleBehaviorConfig, unlike the noise parameters).
+const BLINK_CLOSE_DURATION: Duration = Duration::from_millis(80);
+const BLINK_HOLD_DURATION: Duration = Duration::from_millis(60);
+const BLINK_OPEN_DURATION: Duration = Duration::from_millis(120);
+const BLINK_EYELID_CHANNELS: [usize; 4] = [9, 10, 11, 12];
+// Direction assumption for "closed" -- same convention as
+// tools/face_visualizer.py's eyelid coverage mapping, unconfirmed against
+// real hardware. TODO: verify once the eyelid mechanism is on a bench.
+const BLINK_CLOSED_NORM: f32 = 1.0;
+// Idle noise's per-tick exponential smoothing rate towards its current
+// random retarget value, tuned so it settles within roughly one retarget
+// period rather than snapping.
+const NOISE_SMOOTHING_PER_TICK: f32 = 0.03;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +151,8 @@ struct ConfigFile {
     expression_presets: Vec<ExpressionPreset>,
     #[serde(default)]
     external_input: Option<ExternalInputConfig>,
+    #[serde(default)]
+    idle_behavior: IdleBehaviorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,14 +201,16 @@ impl Default for ExternalInputConfig {
 
 /// Arbitration between the three command sources described in the README's
 /// "控制源仲裁": `Manual` (sliders/presets/sequences), `External` (the
-/// task-4 UDP coefficient stream), and (added when the idle scheduler lands)
-/// `Idle`. Only Manual<->External is wired up here.
+/// task-4 UDP coefficient stream), and `Idle` (task-6 idle noise/blink,
+/// entered automatically from Manual once targets are stationary and no
+/// automated motion is running; any manual write exits it immediately).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ControlSource {
     #[default]
     Manual,
     External,
+    Idle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +222,85 @@ pub struct ExternalInputStatus {
     pub fps: f32,
     pub timeout_ms: u64,
     pub control_source: ControlSource,
+}
+
+/// Idle-behavior tuning, exported from config.py's `IDLE_BEHAVIOR` block
+/// into motor_config.json (see raspi/export_config_json.py). Every field has
+/// a serde default matching the task spec's suggested defaults, so an older
+/// motor_config.json without this block still loads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdleBehaviorConfig {
+    #[serde(default = "default_idle_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_idle_after_seconds")]
+    pub idle_after_seconds: f32,
+    #[serde(default = "default_noise_channel_ids")]
+    pub noise_channel_ids: Vec<usize>,
+    #[serde(default = "default_noise_amplitude")]
+    pub noise_amplitude: f32,
+    #[serde(default = "default_noise_freq_min_hz")]
+    pub noise_freq_min_hz: f32,
+    #[serde(default = "default_noise_freq_max_hz")]
+    pub noise_freq_max_hz: f32,
+    #[serde(default = "default_blink_min_interval_seconds")]
+    pub blink_min_interval_seconds: f32,
+    #[serde(default = "default_blink_max_interval_seconds")]
+    pub blink_max_interval_seconds: f32,
+}
+
+fn default_idle_enabled() -> bool {
+    true
+}
+fn default_idle_after_seconds() -> f32 {
+    3.0
+}
+fn default_noise_channel_ids() -> Vec<usize> {
+    vec![0, 1, 2, 3, 8, 13, 30, 31]
+}
+fn default_noise_amplitude() -> f32 {
+    0.03
+}
+fn default_noise_freq_min_hz() -> f32 {
+    0.2
+}
+fn default_noise_freq_max_hz() -> f32 {
+    0.5
+}
+fn default_blink_min_interval_seconds() -> f32 {
+    2.0
+}
+fn default_blink_max_interval_seconds() -> f32 {
+    6.0
+}
+
+impl Default for IdleBehaviorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_idle_enabled(),
+            idle_after_seconds: default_idle_after_seconds(),
+            noise_channel_ids: default_noise_channel_ids(),
+            noise_amplitude: default_noise_amplitude(),
+            noise_freq_min_hz: default_noise_freq_min_hz(),
+            noise_freq_max_hz: default_noise_freq_max_hz(),
+            blink_min_interval_seconds: default_blink_min_interval_seconds(),
+            blink_max_interval_seconds: default_blink_max_interval_seconds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChannelNoiseState {
+    current: f32,
+    target: f32,
+    next_retarget_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+enum BlinkPhase {
+    Closing,
+    Holding { until: Instant },
+    Opening,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +430,7 @@ pub struct RuntimeState {
     pub target_norm: Vec<f32>,
     pub current_norm: Vec<f32>,
     pub control_source: ControlSource,
+    pub idle_behavior_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -476,6 +577,13 @@ struct InnerState {
     active_transition: Option<ActiveTransition>,
     sequence_playback: Option<SequencePlaybackState>,
     playback_generation: u64,
+    idle_behavior: IdleBehaviorConfig,
+    last_moving_at: Instant,
+    idle_base_applied: Option<Vec<f32>>,
+    noise_states: BTreeMap<usize, ChannelNoiseState>,
+    blink_phase: Option<BlinkPhase>,
+    next_blink_at: Instant,
+    rng: StdRng,
 }
 
 pub struct ControlService {
@@ -510,6 +618,15 @@ impl ControlService {
 
         let external_input_config = config.external_input.unwrap_or_default();
         let sequences = load_sequences(&app_dir);
+        let idle_behavior = config.idle_behavior;
+        let now = Instant::now();
+        let mut rng = StdRng::from_rng(&mut rand::rng());
+        let next_blink_at = now
+            + random_seconds(
+                &mut rng,
+                idle_behavior.blink_min_interval_seconds,
+                idle_behavior.blink_max_interval_seconds,
+            );
 
         let state = Arc::new(Mutex::new(InnerState {
             frame_seq: 0,
@@ -531,6 +648,13 @@ impl ControlService {
             active_transition: None,
             sequence_playback: None,
             playback_generation: 0,
+            idle_behavior,
+            last_moving_at: now,
+            idle_base_applied: None,
+            noise_states: BTreeMap::new(),
+            blink_phase: None,
+            next_blink_at,
+            rng,
         }));
 
         spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger), Arc::clone(&socket));
@@ -847,7 +971,23 @@ impl ControlService {
     /// the UI, not a way to permanently block a misbehaving external source.
     pub async fn force_manual_control(&self) -> RuntimeState {
         let mut state = self.state.lock().await;
+        if state.control_source == ControlSource::Idle {
+            exit_idle(&mut state);
+        }
         state.control_source = ControlSource::Manual;
+        build_runtime_state(&state)
+    }
+
+    /// Runtime master switch for idle behavior (the config file's
+    /// `idleBehavior.enabled` is just the startup default). Turning it off
+    /// while currently Idle drops straight back to Manual.
+    pub async fn set_idle_behavior_enabled(&self, enabled: bool) -> RuntimeState {
+        let mut state = self.state.lock().await;
+        state.idle_behavior.enabled = enabled;
+        if !enabled && state.control_source == ControlSource::Idle {
+            state.control_source = ControlSource::Manual;
+            exit_idle(&mut state);
+        }
         build_runtime_state(&state)
     }
 
@@ -984,6 +1124,10 @@ impl AppState {
 
     pub async fn force_manual_control(&self) -> RuntimeState {
         self.service.force_manual_control().await
+    }
+
+    pub async fn set_idle_behavior_enabled(&self, enabled: bool) -> RuntimeState {
+        self.service.set_idle_behavior_enabled(enabled).await
     }
 
     pub async fn external_input_status(&self) -> ExternalInputStatus {
@@ -1263,6 +1407,10 @@ fn cancel_automated_motion(state: &mut InnerState) {
     if state.sequence_playback.take().is_some() {
         state.playback_generation = state.playback_generation.wrapping_add(1);
     }
+    if state.control_source == ControlSource::Idle {
+        state.control_source = ControlSource::Manual;
+        exit_idle(state);
+    }
 }
 
 fn maybe_apply_jaw_coupling(state: &mut InnerState, updated_motor_id: usize) {
@@ -1319,6 +1467,7 @@ fn build_runtime_state(state: &InnerState) -> RuntimeState {
         target_norm: normalized_view(&state.channels, &state.target_applied),
         current_norm: normalized_view(&state.channels, &state.current_applied),
         control_source: state.control_source,
+        idle_behavior_enabled: state.idle_behavior.enabled,
     }
 }
 
@@ -1382,6 +1531,198 @@ fn advance_active_transition(state: &mut InnerState) {
 
     if t >= 1.0 {
         state.active_transition = None;
+    }
+}
+
+fn random_seconds(rng: &mut StdRng, min: f32, max: f32) -> Duration {
+    let (min, max) = (min.max(0.0), max.max(0.0));
+    let (low, high) = if min <= max { (min, max) } else { (max, min) };
+    let secs = if high > low {
+        rng.random_range(low..high)
+    } else {
+        low
+    };
+    Duration::from_secs_f32(secs)
+}
+
+/// Entry point called every heartbeat tick to drive Manual<->Idle
+/// transitions and, while already Idle, the noise/blink behavior itself.
+/// `moving` is this tick's "is anything still chasing a target" signal,
+/// already computed by the rate-limiter loop.
+fn update_idle_behavior(state: &mut InnerState, moving: bool) {
+    match state.control_source {
+        ControlSource::External => {}
+        ControlSource::Manual => {
+            let automated_motion_running =
+                state.sequence_playback.is_some() || state.active_transition.is_some();
+            if !state.idle_behavior.enabled || moving || automated_motion_running {
+                state.last_moving_at = Instant::now();
+                return;
+            }
+            let idle_after =
+                Duration::from_secs_f32(state.idle_behavior.idle_after_seconds.max(0.0));
+            if state.last_moving_at.elapsed() >= idle_after {
+                enter_idle(state);
+            }
+        }
+        ControlSource::Idle => {
+            if !state.idle_behavior.enabled {
+                state.control_source = ControlSource::Manual;
+                exit_idle(state);
+                return;
+            }
+            update_blink(state);
+            update_idle_noise(state);
+        }
+    }
+}
+
+fn enter_idle(state: &mut InnerState) {
+    state.control_source = ControlSource::Idle;
+    state.idle_base_applied = Some(state.target_applied.clone());
+    let now = Instant::now();
+    state.noise_states = state
+        .idle_behavior
+        .noise_channel_ids
+        .clone()
+        .into_iter()
+        .map(|channel_id| {
+            (
+                channel_id,
+                ChannelNoiseState {
+                    current: 0.0,
+                    target: 0.0,
+                    next_retarget_at: now,
+                },
+            )
+        })
+        .collect();
+    state.next_blink_at = now
+        + random_seconds(
+            &mut state.rng,
+            state.idle_behavior.blink_min_interval_seconds,
+            state.idle_behavior.blink_max_interval_seconds,
+        );
+    state.blink_phase = None;
+}
+
+/// Leaves Idle bookkeeping clean; does NOT touch `control_source` itself --
+/// callers (a manual write, External claiming control, or the behavior
+/// being disabled mid-idle) decide what it becomes next.
+fn exit_idle(state: &mut InnerState) {
+    state.idle_base_applied = None;
+    state.noise_states.clear();
+    state.blink_phase = None;
+    state.last_moving_at = Instant::now();
+}
+
+fn update_blink(state: &mut InnerState) {
+    let now = Instant::now();
+    match state.blink_phase.clone() {
+        None => {
+            if now >= state.next_blink_at {
+                start_blink_transition(state, BLINK_CLOSED_NORM, BLINK_CLOSE_DURATION);
+                state.blink_phase = Some(BlinkPhase::Closing);
+            }
+        }
+        Some(BlinkPhase::Closing) => {
+            if state.active_transition.is_none() {
+                state.blink_phase = Some(BlinkPhase::Holding {
+                    until: now + BLINK_HOLD_DURATION,
+                });
+            }
+        }
+        Some(BlinkPhase::Holding { until }) => {
+            if now >= until {
+                start_blink_reopen_transition(state);
+                state.blink_phase = Some(BlinkPhase::Opening);
+            }
+        }
+        Some(BlinkPhase::Opening) => {
+            if state.active_transition.is_none() {
+                state.blink_phase = None;
+                state.next_blink_at = now
+                    + random_seconds(
+                        &mut state.rng,
+                        state.idle_behavior.blink_min_interval_seconds,
+                        state.idle_behavior.blink_max_interval_seconds,
+                    );
+            }
+        }
+    }
+}
+
+/// Starts a transition that only moves the eyelid channels (to `target_norm`
+/// on each of their own scales); every other channel's start==end so it
+/// simply holds still. This shares the single global `active_transition`
+/// slot with presets/sequences, which is safe here because blinks only ever
+/// run while Idle, and Idle is only entered when nothing else is animating.
+fn start_blink_transition(state: &mut InnerState, target_norm: f32, duration: Duration) {
+    let mut end = state.target_applied.clone();
+    for &channel_id in &BLINK_EYELID_CHANNELS {
+        end[channel_id] = state.channels[channel_id].norm_to_applied(target_norm);
+    }
+    start_transition(state, end, duration, EasingKind::EaseInOutCubic);
+}
+
+/// Reopens back to the pose the eyelids held right before the blink started
+/// (their entry in `idle_base_applied`), not to a fixed "open" norm value --
+/// idle noise may have nudged them since, though by default the eyelid
+/// channels aren't in `noise_channel_ids` at all.
+fn start_blink_reopen_transition(state: &mut InnerState) {
+    let mut end = state.target_applied.clone();
+    if let Some(base) = state.idle_base_applied.clone() {
+        for &channel_id in &BLINK_EYELID_CHANNELS {
+            end[channel_id] = base[channel_id];
+        }
+    }
+    start_transition(state, end, BLINK_OPEN_DURATION, EasingKind::EaseInOutCubic);
+}
+
+/// Adds a smoothed random-walk offset (in this channel's own norm space) on
+/// top of the pose `idle_base_applied` captured when Idle was entered.
+/// Paused per-channel while that channel is mid-blink, per spec.
+fn update_idle_noise(state: &mut InnerState) {
+    let Some(base) = state.idle_base_applied.clone() else {
+        return;
+    };
+    let now = Instant::now();
+    let amplitude = state.idle_behavior.noise_amplitude.max(0.0);
+    let freq_min = state.idle_behavior.noise_freq_min_hz.max(0.01);
+    let freq_max = state.idle_behavior.noise_freq_max_hz.max(freq_min);
+
+    let channel_ids: Vec<usize> = state.noise_states.keys().copied().collect();
+    for channel_id in channel_ids {
+        if state.blink_phase.is_some() && BLINK_EYELID_CHANNELS.contains(&channel_id) {
+            continue;
+        }
+
+        let needs_retarget = state
+            .noise_states
+            .get(&channel_id)
+            .is_some_and(|entry| now >= entry.next_retarget_at);
+        if needs_retarget {
+            let new_target = state.rng.random_range(-amplitude..=amplitude);
+            let period_hz = state.rng.random_range(freq_min..=freq_max);
+            let period = Duration::from_secs_f32(1.0 / period_hz);
+            if let Some(entry) = state.noise_states.get_mut(&channel_id) {
+                entry.target = new_target;
+                entry.next_retarget_at = now + period;
+            }
+        }
+
+        let Some(entry) = state.noise_states.get_mut(&channel_id) else {
+            continue;
+        };
+        entry.current += (entry.target - entry.current) * NOISE_SMOOTHING_PER_TICK;
+        let noise_value = entry.current;
+
+        let channel = state.channels[channel_id].clone();
+        let base_norm = channel.applied_to_norm(base[channel_id]);
+        let noisy_norm = (base_norm + noise_value).clamp(-1.0, 1.0);
+        let applied = channel.norm_to_applied(noisy_norm);
+        state.target_applied[channel_id] = applied;
+        state.target_logical[channel_id] = applied - channel.offset;
     }
 }
 
@@ -1510,6 +1851,12 @@ fn spawn_udp_heartbeat(
                         }
                     }
 
+                    // Idle behavior only makes sense while something is
+                    // actually connected to show it; while disconnected,
+                    // last_moving_at is kept fresh so reconnecting doesn't
+                    // immediately count as "stationary for N seconds".
+                    update_idle_behavior(state, moving);
+
                     if moving || tick % KEEPALIVE_TICK_DIVISOR == 0 {
                         state.frame_seq += 1;
                         let source = if moving {
@@ -1535,6 +1882,7 @@ fn spawn_udp_heartbeat(
                         None
                     }
                 } else {
+                    state.last_moving_at = Instant::now();
                     None
                 }
             };
@@ -1667,6 +2015,9 @@ fn apply_external_frame_locked(state: &mut InnerState, frame: ExternalInputFrame
     }
     state.external_last_seq = Some(frame.seq);
     state.external_last_frame_at = Some(now);
+    if state.control_source == ControlSource::Idle {
+        exit_idle(state);
+    }
     state.control_source = ControlSource::External;
 
     for (motor_id, maybe_coefficient) in frame.coefficients.into_iter().enumerate() {
@@ -1829,6 +2180,13 @@ mod tests {
             active_transition: None,
             sequence_playback: None,
             playback_generation: 0,
+            idle_behavior: IdleBehaviorConfig::default(),
+            last_moving_at: Instant::now(),
+            idle_base_applied: None,
+            noise_states: BTreeMap::new(),
+            blink_phase: None,
+            next_blink_at: Instant::now(),
+            rng: StdRng::seed_from_u64(42),
         }
     }
 
@@ -1882,6 +2240,13 @@ mod tests {
             active_transition: None,
             sequence_playback: None,
             playback_generation: 0,
+            idle_behavior: IdleBehaviorConfig::default(),
+            last_moving_at: Instant::now(),
+            idle_base_applied: None,
+            noise_states: BTreeMap::new(),
+            blink_phase: None,
+            next_blink_at: Instant::now(),
+            rng: StdRng::seed_from_u64(42),
         }
     }
 
@@ -2272,6 +2637,154 @@ mod tests {
         assert!(
             !status_after.playing,
             "manual write should stop sequence playback"
+        );
+    }
+
+    fn idle_ready_state() -> InnerState {
+        let mut state = plain_state();
+        state.idle_behavior.idle_after_seconds = 0.0;
+        state.last_moving_at = Instant::now() - Duration::from_secs(1);
+        state
+    }
+
+    #[test]
+    fn manual_source_enters_idle_once_stationary_past_the_threshold() {
+        let mut state = idle_ready_state();
+        update_idle_behavior(&mut state, false);
+        assert_eq!(state.control_source, ControlSource::Idle);
+        assert!(state.idle_base_applied.is_some());
+    }
+
+    #[test]
+    fn idle_entry_is_blocked_while_moving_or_automated_motion_is_running() {
+        let mut state = idle_ready_state();
+        update_idle_behavior(&mut state, true); // still moving
+        assert_eq!(state.control_source, ControlSource::Manual);
+
+        let mut state = idle_ready_state();
+        state.sequence_playback = Some(SequencePlaybackState {
+            sequence_id: "demo".to_string(),
+            label: "Demo".to_string(),
+            step_index: 0,
+            total_steps: 1,
+        });
+        update_idle_behavior(&mut state, false);
+        assert_eq!(
+            state.control_source,
+            ControlSource::Manual,
+            "a running sequence should block idle entry"
+        );
+    }
+
+    #[test]
+    fn idle_disabled_never_enters_idle() {
+        let mut state = idle_ready_state();
+        state.idle_behavior.enabled = false;
+        update_idle_behavior(&mut state, false);
+        assert_eq!(state.control_source, ControlSource::Manual);
+    }
+
+    #[test]
+    fn cancel_automated_motion_exits_idle_back_to_manual() {
+        let mut state = idle_ready_state();
+        update_idle_behavior(&mut state, false);
+        assert_eq!(state.control_source, ControlSource::Idle);
+
+        cancel_automated_motion(&mut state);
+        assert_eq!(state.control_source, ControlSource::Manual);
+        assert!(state.idle_base_applied.is_none());
+        assert!(state.noise_states.is_empty());
+    }
+
+    #[test]
+    fn idle_noise_stays_within_amplitude_around_the_base_pose() {
+        let mut state = idle_ready_state();
+        state.channels[0] = ch_with_id(0, 0.0, 200.0, 100.0);
+        state.target_applied[0] = 100.0;
+        state.idle_behavior.noise_channel_ids = vec![0];
+        state.idle_behavior.noise_amplitude = 0.03;
+
+        update_idle_behavior(&mut state, false); // enters idle, snapshots base pose
+        assert_eq!(state.control_source, ControlSource::Idle);
+
+        let base_norm = state.channels[0].applied_to_norm(100.0);
+        for _ in 0..50 {
+            update_idle_behavior(&mut state, false);
+            let norm = state.channels[0].applied_to_norm(state.target_applied[0]);
+            assert!(
+                (norm - base_norm).abs() <= state.idle_behavior.noise_amplitude + 1e-3,
+                "noise should stay within the configured amplitude of the base pose, got norm={norm}"
+            );
+        }
+    }
+
+    #[test]
+    fn blink_progresses_through_phases_and_returns_to_base_pose() {
+        let mut state = idle_ready_state();
+        // Keep noise off the eyelid channels so only the blink moves them.
+        state.idle_behavior.noise_channel_ids = vec![];
+        update_idle_behavior(&mut state, false);
+        assert_eq!(state.control_source, ControlSource::Idle);
+        let base = state.idle_base_applied.clone().unwrap();
+
+        // Force the blink to fire immediately.
+        state.next_blink_at = Instant::now() - Duration::from_millis(1);
+        update_idle_behavior(&mut state, false);
+        assert!(matches!(state.blink_phase, Some(BlinkPhase::Closing)));
+
+        // Fast-forward the closing transition to completion (mirrors the
+        // real tick loop's advance_active_transition, called here directly
+        // since these tests drive the state machine without a real clock).
+        if let Some(transition) = &mut state.active_transition {
+            transition.started_at = Instant::now() - Duration::from_secs(1);
+        }
+        advance_active_transition(&mut state);
+        for &channel_id in &BLINK_EYELID_CHANNELS {
+            let norm = state.channels[channel_id].applied_to_norm(state.target_applied[channel_id]);
+            approx(norm, BLINK_CLOSED_NORM);
+        }
+        update_idle_behavior(&mut state, false);
+        assert!(matches!(
+            state.blink_phase,
+            Some(BlinkPhase::Holding { .. })
+        ));
+
+        // Fast-forward past the hold.
+        if let Some(BlinkPhase::Holding { until }) = &mut state.blink_phase {
+            *until = Instant::now() - Duration::from_millis(1);
+        }
+        update_idle_behavior(&mut state, false);
+        assert!(matches!(state.blink_phase, Some(BlinkPhase::Opening)));
+
+        // Fast-forward the opening transition to completion.
+        if let Some(transition) = &mut state.active_transition {
+            transition.started_at = Instant::now() - Duration::from_secs(1);
+        }
+        advance_active_transition(&mut state);
+        update_idle_behavior(&mut state, false);
+        assert!(
+            state.blink_phase.is_none(),
+            "blink should finish and clear its phase"
+        );
+        for &channel_id in &BLINK_EYELID_CHANNELS {
+            approx(state.target_applied[channel_id], base[channel_id]);
+        }
+    }
+
+    #[test]
+    fn idle_noise_is_paused_on_channels_currently_mid_blink() {
+        let mut state = idle_ready_state();
+        state.idle_behavior.noise_channel_ids = vec![9]; // overlaps a blink channel on purpose
+        update_idle_behavior(&mut state, false);
+        state.next_blink_at = Instant::now() - Duration::from_millis(1);
+        update_idle_behavior(&mut state, false); // starts the blink's closing transition
+        assert!(state.blink_phase.is_some());
+
+        let applied_from_blink = state.target_applied[9];
+        update_idle_noise(&mut state);
+        assert_eq!(
+            state.target_applied[9], applied_from_blink,
+            "noise must not touch a channel while it's mid-blink"
         );
     }
 }

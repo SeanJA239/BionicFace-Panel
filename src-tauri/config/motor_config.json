@@ -842,5 +842,24 @@
   "externalInput": {
     "port": 6100,
     "timeoutMs": 500
+  },
+  "idleBehavior": {
+    "enabled": true,
+    "idleAfterSeconds": 3.0,
+    "noiseChannelIds": [
+      0,
+      1,
+      2,
+      3,
+      8,
+      13,
+      30,
+      31
+    ],
+    "noiseAmplitude": 0.03,
+    "noiseFreqMinHz": 0.2,
+    "noiseFreqMaxHz": 0.5,
+    "blinkMinIntervalSeconds": 2.0,
+    "blinkMaxIntervalSeconds": 6.0
   }
 }

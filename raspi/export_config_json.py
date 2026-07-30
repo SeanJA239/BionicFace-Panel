@@ -111,6 +111,31 @@ def load_expression_presets(path: Path) -> list[dict]:
     return presets
 
 
+def build_idle_behavior(module) -> dict:
+    """Maps config.py's IDLE_BEHAVIOR (snake_case, matching control.rs's
+    IdleBehaviorConfig field names 1:1) to the camelCase keys Rust's serde
+    deserializer expects on the wire. Every key is optional on the Rust side
+    (each has its own serde default), so a missing IDLE_BEHAVIOR dict, or a
+    partially-filled one, still loads.
+    """
+    idle_behavior = getattr(module, "IDLE_BEHAVIOR", {})
+    key_map = {
+        "enabled": "enabled",
+        "idle_after_seconds": "idleAfterSeconds",
+        "noise_channel_ids": "noiseChannelIds",
+        "noise_amplitude": "noiseAmplitude",
+        "noise_freq_min_hz": "noiseFreqMinHz",
+        "noise_freq_max_hz": "noiseFreqMaxHz",
+        "blink_min_interval_seconds": "blinkMinIntervalSeconds",
+        "blink_max_interval_seconds": "blinkMaxIntervalSeconds",
+    }
+    return {
+        camel_key: idle_behavior[snake_key]
+        for snake_key, camel_key in key_map.items()
+        if snake_key in idle_behavior
+    }
+
+
 def main() -> None:
     module = load_module(CONFIG_PATH)
     if len(module.MOTOR_MAP) != 32:
@@ -130,6 +155,7 @@ def main() -> None:
             "port": int(getattr(module, "EXTERNAL_INPUT_PORT", 6100)),
             "timeoutMs": int(getattr(module, "EXTERNAL_INPUT_TIMEOUT_MS", 500)),
         },
+        "idleBehavior": build_idle_behavior(module),
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

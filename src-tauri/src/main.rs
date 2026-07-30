@@ -144,6 +144,14 @@ async fn force_manual_control(state: State<'_, Arc<AppState>>) -> Result<Runtime
 }
 
 #[tauri::command]
+async fn set_idle_behavior_enabled(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<RuntimeState, String> {
+    Ok(state.set_idle_behavior_enabled(enabled).await)
+}
+
+#[tauri::command]
 async fn list_sequences(state: State<'_, Arc<AppState>>) -> Result<Vec<SequenceSummary>, String> {
     Ok(state.list_sequences().await)
 }
@@ -236,6 +244,7 @@ pub fn run() {
             get_runtime_state,
             get_external_input_status,
             force_manual_control,
+            set_idle_behavior_enabled,
             get_last_frame,
             flush_current_frame,
         ])

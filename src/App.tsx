@@ -10,15 +10,21 @@ import {
   getLastFrame,
   getMotorChannels,
   getRuntimeState,
+  getSequencePlaybackStatus,
   getTransportStatus,
   listExpressionPresets,
+  listSequences,
   nod,
+  playSequence,
   setMotorTarget,
+  stopSequence,
   wink,
   type ExpressionPresetSummary,
   type ExternalInputStatus,
   type MotorChannel,
   type RuntimeState,
+  type SequencePlaybackStatus,
+  type SequenceSummary,
   type UdpControlFrame,
 } from "./tauri";
 
@@ -109,6 +115,14 @@ function App() {
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [presetIntensity, setPresetIntensity] = useState(1.0);
   const [externalStatus, setExternalStatus] = useState<ExternalInputStatus | null>(null);
+  const [sequences, setSequences] = useState<SequenceSummary[]>([]);
+  const [playbackStatus, setPlaybackStatus] = useState<SequencePlaybackStatus>({
+    playing: false,
+    sequenceId: null,
+    label: null,
+    stepIndex: null,
+    totalSteps: null,
+  });
   const isExternal = runtime.controlSource === "external";
   const pendingSendsRef = useRef(new Map<number, number>());
   const sendTimerRef = useRef<number | null>(null);
@@ -116,16 +130,18 @@ function App() {
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [motorChannels, runtimeState, transportStatus, presets] = await Promise.all([
+        const [motorChannels, runtimeState, transportStatus, presets, sequenceList] = await Promise.all([
           getMotorChannels(),
           getRuntimeState(),
           getTransportStatus(),
           listExpressionPresets(),
+          listSequences(),
         ]);
         setChannels(motorChannels);
         setRuntime(runtimeState);
         setConnected(transportStatus.connected);
         setExpressionPresets(presets);
+        setSequences(sequenceList);
         if (transportStatus.endpoint) {
           setEndpoint(transportStatus.endpoint);
         }
@@ -141,9 +157,14 @@ function App() {
   useEffect(() => {
     const timer = window.setInterval(async () => {
       try {
-        const [runtimeState, status] = await Promise.all([getRuntimeState(), getExternalInputStatus()]);
+        const [runtimeState, status, playback] = await Promise.all([
+          getRuntimeState(),
+          getExternalInputStatus(),
+          getSequencePlaybackStatus(),
+        ]);
         setRuntime(runtimeState);
         setExternalStatus(status);
+        setPlaybackStatus(playback);
         if (runtimeState.controlSource === "external") {
           setActivePresetId(null);
         }
@@ -159,6 +180,27 @@ function App() {
       const next = await forceManualControl();
       setRuntime(next);
       setStatus("Forced control source back to Manual");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function handlePlaySequence(sequence: SequenceSummary) {
+    try {
+      await playSequence(sequence.id);
+      setActivePresetId(null);
+      setStatus(`Playing sequence: ${sequence.label}`);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  async function handleStopSequence() {
+    try {
+      const next = await stopSequence();
+      setRuntime(next);
+      setPlaybackStatus((current) => ({ ...current, playing: false }));
+      setStatus("Sequence playback stopped");
     } catch (error) {
       setStatus(String(error));
     }
@@ -360,6 +402,31 @@ function App() {
                   </button>
                 ))}
               </div>
+            </>
+          ) : null}
+          {sequences.length > 0 ? (
+            <>
+              <div className="button-row">
+                {sequences.map((sequence) => (
+                  <button
+                    className={playbackStatus.sequenceId === sequence.id ? "" : "secondary"}
+                    key={sequence.id}
+                    disabled={isExternal}
+                    onClick={() => handlePlaySequence(sequence)}
+                  >
+                    {sequence.label}
+                  </button>
+                ))}
+                <button className="secondary" onClick={handleStopSequence} disabled={!playbackStatus.playing}>
+                  Stop Sequence
+                </button>
+              </div>
+              {playbackStatus.playing ? (
+                <p className="status-line">
+                  Playing <strong>{playbackStatus.label}</strong>: step{" "}
+                  {(playbackStatus.stepIndex ?? 0) + 1}/{playbackStatus.totalSteps}
+                </p>
+              ) : null}
             </>
           ) : null}
           <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>

@@ -46,6 +46,21 @@ export type ExternalInputStatus = {
   controlSource: ControlSource;
 };
 
+export type SequenceSummary = {
+  id: string;
+  label: string;
+  stepCount: number;
+  loopPlayback: boolean;
+};
+
+export type SequencePlaybackStatus = {
+  playing: boolean;
+  sequenceId: string | null;
+  label: string | null;
+  stepIndex: number | null;
+  totalSteps: number | null;
+};
+
 export type UdpControlFrame = {
   frameId: number;
   timestampNs: number;
@@ -121,6 +136,22 @@ export async function applyExpressionPresetScaled(
 
 export async function nod(): Promise<RuntimeState> {
   return safeInvoke("nod");
+}
+
+export async function listSequences(): Promise<SequenceSummary[]> {
+  return safeInvoke("list_sequences");
+}
+
+export async function getSequencePlaybackStatus(): Promise<SequencePlaybackStatus> {
+  return safeInvoke("get_sequence_playback_status");
+}
+
+export async function playSequence(sequenceId: string): Promise<void> {
+  return safeInvoke("play_sequence", { sequenceId });
+}
+
+export async function stopSequence(): Promise<RuntimeState> {
+  return safeInvoke("stop_sequence");
 }
 
 export async function wink(): Promise<RuntimeState> {

@@ -166,6 +166,30 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 
 > 三态仲裁里预留了第三个源 `Idle`（Manual 且长时间静止，触发待机噪声/眨眼），但目前只接入了 `Manual`/`External`——`Idle` 的判定条件依赖尚不存在的序列播放器与待机调度器，会在那两个任务落地时再扩展 `ControlSource` 枚举，这里不提前定义用不到的状态。
 
+## 缓动与表情序列播放
+
+原有的恒速插值（100Hz、每 tick 最多 2°/`step_towards`）仍然是安全底层，**永远在跑，不会被移除或放宽**。在它之上加了一层"轨迹生成"：预设/序列不再把最终目标直接写进 `target_applied`，而是由一个"缓动过渡"（`ActiveTransition`）按经过的时间逐 tick 算出中间目标，恒速插值继续对这个不断变化的中间目标做限速追赶——如果缓动曲线某一刻需要的速度超过 200°/s，`current_applied` 就会短暂落后于目标，而不是安全上限被抬高。
+
+- **缓动函数**（`control.rs` 的 `EasingKind`）：`linear`、`ease_in_out_cubic`、`min_jerk`（`10t³-15t⁴+6t⁵`，两端速度和加速度都为零，是三者里最"顺"的一个，因此是默认值）。
+- **预设按钮**：点击后不再瞬间跳变，而是按默认过渡（`600ms` + `min_jerk`，`control.rs` 里的常量，改动需要重新编译）经缓动层过渡到目标。
+- **序列脚本**：JSON 文件放在 **`src-tauri/sequences/*.json`**（和 `src-tauri/config/motor_config.json` 平级，Rust 启动时扫描整个目录；单个文件解析失败只跳过并打日志，不影响其它序列或整个应用启动）。字段用蛇形命名（`transition_ms`、`hold_ms`），这是有意和协议其余部分的 camelCase 区分开的——序列文件是运维手写/编辑的资产，直接照抄任务文档给的示例格式：
+
+  ```json
+  {
+    "id": "demo_1",
+    "label": "演示序列1：中性→惊讶→喜悦→回中性",
+    "steps": [
+      { "preset": "惊讶", "intensity": 1.0, "transition_ms": 500, "easing": "min_jerk", "hold_ms": 1200 },
+      { "preset": "喜悦", "intensity": 0.8, "transition_ms": 700, "easing": "ease_in_out_cubic", "hold_ms": 1500 }
+    ],
+    "loop": false
+  }
+  ```
+
+  仓库自带两个演示序列：[demo_1.json](src-tauri/sequences/demo_1.json)（中性→惊讶→喜悦→回中性）、[demo_wink_loop.json](src-tauri/sequences/demo_wink_loop.json)（循环眨眼）。`preset` 字段引用的是 `presets.json` 里的表情 id（本仓库是中文标签如 `"惊讶"`/`"喜悦"`/`"wink"`/`"rest"`，不是任务文档示例里的英文 id `"surprise"`/`"happy"`——照仓库现状为准）。
+- **播放器**：Rust 端在心跳循环里驱动，每步先启动该步骤的缓动过渡（复用预设强度缩放逻辑），等待 `transition_ms + hold_ms` 后进入下一步；`loop: true` 时播完最后一步回到第一步继续。Tauri 命令：`list_sequences`、`play_sequence(sequenceId)`、`stop_sequence`、`get_sequence_playback_status`（当前序列/步骤索引/总步数）。
+- **抢占规则**：任何手动写操作（拖滑条、点预设、`center_all`、`nod`、`wink`）都会立刻清掉正在跑的缓动过渡和序列播放，目标保持在被打断那一刻的值——不会先播完当前步骤再让位。External 源激活时序列无法开始播放（`play_sequence` 会像其它手动命令一样返回错误）。前端每 300ms 轮询播放状态，播放中的序列按钮高亮，并显示"当前步骤/总步骤"。
+
 ## 通道禁用与脖子电机
 
 协议固定为 32 通道。30、31 两个脖子电机已随脖子结构恢复而重新启用，当前全部 32 个通道均参与标定。**但 30、31 尚未完成正式的运动范围标定**，`MOTOR_LIMITS` 暂时保守收紧到 `(75, 105)`（中位 90° 上下各 15°），后续完成标定后再放宽。
@@ -197,7 +221,8 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 | [raspi/export_config_json.py](raspi/export_config_json.py) | 配置导出脚本（Python + presets.json → Rust JSON） |
 | [raspi/servo_server.py](raspi/servo_server.py) | 树莓派 UDP 执行器（支持 `--dry-run`，无硬件时跳过 I2C，只打印帧率/摘要） |
 | [tools/face_visualizer.py](tools/face_visualizer.py) | 无硬件开发用：监听 UDP、渲染 2D 简笔人脸，可完全替代树莓派执行器 |
-| [src-tauri/src/control.rs](src-tauri/src/control.rs) | Rust 控制核心（补偿、插值、联动、预设、心跳、日志） |
+| [src-tauri/sequences/](src-tauri/sequences) | 表情序列脚本（`*.json`），启动时扫描整个目录 |
+| [src-tauri/src/control.rs](src-tauri/src/control.rs) | Rust 控制核心（补偿、插值、联动、预设、缓动/序列、外部输入仲裁、心跳、日志） |
 | [src/App.tsx](src/App.tsx) | 前端控制台 UI |
 | [docs/setup_guide_zh.md](docs/setup_guide_zh.md) | 环境配置与部署文档 |
 

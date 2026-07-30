@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use control::{
     AppState, ExpressionPresetSummary, ExternalInputStatus, MotorChannel, MotorTargetUpdate,
-    RuntimeState, TransportStatus, UdpControlFrame,
+    RuntimeState, SequencePlaybackStatus, SequenceSummary, TransportStatus, UdpControlFrame,
 };
 use tauri::{Manager, State};
 
@@ -144,6 +144,31 @@ async fn force_manual_control(state: State<'_, Arc<AppState>>) -> Result<Runtime
 }
 
 #[tauri::command]
+async fn list_sequences(state: State<'_, Arc<AppState>>) -> Result<Vec<SequenceSummary>, String> {
+    Ok(state.list_sequences().await)
+}
+
+#[tauri::command]
+async fn get_sequence_playback_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<SequencePlaybackStatus, String> {
+    Ok(state.sequence_playback_status().await)
+}
+
+#[tauri::command]
+async fn play_sequence(state: State<'_, Arc<AppState>>, sequence_id: String) -> Result<(), String> {
+    state
+        .play_sequence(&sequence_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn stop_sequence(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    Ok(state.stop_sequence().await)
+}
+
+#[tauri::command]
 async fn get_last_frame(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<UdpControlFrame>, String> {
@@ -204,6 +229,10 @@ pub fn run() {
             apply_expression_preset_scaled,
             nod,
             wink,
+            list_sequences,
+            get_sequence_playback_status,
+            play_sequence,
+            stop_sequence,
             get_runtime_state,
             get_external_input_status,
             force_manual_control,

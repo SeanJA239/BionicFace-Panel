@@ -43,6 +43,13 @@ const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
 const WINK_HOLD: Duration = Duration::from_millis(500);
 const WINK_PRESET_ID: &str = "wink";
 
+// Presets no longer snap directly to their target; this is the eased
+// transition applied on top of the always-on rate limiter (step_towards),
+// which remains the safety floor and is never bypassed or loosened.
+const DEFAULT_PRESET_TRANSITION: Duration = Duration::from_millis(600);
+const DEFAULT_PRESET_EASING: EasingKind = EasingKind::MinJerk;
+const SEQUENCES_DIR: &str = "sequences";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MotorChannel {
@@ -213,6 +220,102 @@ pub struct ExpressionPresetSummary {
     pub label: String,
 }
 
+/// Easing curves for the transition layer sitting on top of the base
+/// constant-velocity rate limiter (`step_towards`). `min_jerk` is
+/// `10t^3 - 15t^4 + 6t^5`, the standard minimum-jerk trajectory shape.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EasingKind {
+    Linear,
+    EaseInOutCubic,
+    MinJerk,
+}
+
+impl EasingKind {
+    fn ease(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            EasingKind::Linear => t,
+            EasingKind::EaseInOutCubic => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                }
+            }
+            EasingKind::MinJerk => t * t * t * (10.0 - 15.0 * t + 6.0 * t * t),
+        }
+    }
+}
+
+/// A 32-channel eased transition from `start_applied` to `end_applied`,
+/// recomputed into `target_applied` every heartbeat tick based on elapsed
+/// wall time. The base rate limiter still runs underneath unconditionally:
+/// if the eased curve ever demands a faster step than
+/// `MAX_STEP_PER_TICK_DEG`, `current_applied` simply lags behind rather than
+/// the safety cap being raised or skipped.
+#[derive(Debug, Clone)]
+struct ActiveTransition {
+    start_applied: Vec<f32>,
+    end_applied: Vec<f32>,
+    started_at: Instant,
+    duration: Duration,
+    easing: EasingKind,
+}
+
+// Deliberately snake_case on the wire (not camelCase like the rest of the
+// Rust<->frontend protocol): sequences/*.json is a hand-authored asset per
+// the task spec's own example, using transition_ms/hold_ms verbatim.
+#[derive(Debug, Clone, Deserialize)]
+struct SequenceStepDef {
+    preset: String,
+    #[serde(default = "default_step_intensity")]
+    intensity: f32,
+    transition_ms: u64,
+    easing: EasingKind,
+    hold_ms: u64,
+}
+
+fn default_step_intensity() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SequenceDef {
+    id: String,
+    label: String,
+    steps: Vec<SequenceStepDef>,
+    #[serde(default, rename = "loop")]
+    loop_playback: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceSummary {
+    pub id: String,
+    pub label: String,
+    pub step_count: usize,
+    pub loop_playback: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SequencePlaybackState {
+    sequence_id: String,
+    label: String,
+    step_index: usize,
+    total_steps: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequencePlaybackStatus {
+    pub playing: bool,
+    pub sequence_id: Option<String>,
+    pub label: Option<String>,
+    pub step_index: Option<usize>,
+    pub total_steps: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeState {
@@ -369,6 +472,10 @@ struct InnerState {
     external_last_seq: Option<u64>,
     external_last_frame_at: Option<Instant>,
     external_fps_ema: f32,
+    sequences: Vec<SequenceDef>,
+    active_transition: Option<ActiveTransition>,
+    sequence_playback: Option<SequencePlaybackState>,
+    playback_generation: u64,
 }
 
 pub struct ControlService {
@@ -402,6 +509,7 @@ impl ControlService {
             .collect();
 
         let external_input_config = config.external_input.unwrap_or_default();
+        let sequences = load_sequences(&app_dir);
 
         let state = Arc::new(Mutex::new(InnerState {
             frame_seq: 0,
@@ -419,6 +527,10 @@ impl ControlService {
             external_last_seq: None,
             external_last_frame_at: None,
             external_fps_ema: 0.0,
+            sequences,
+            active_transition: None,
+            sequence_playback: None,
+            playback_generation: 0,
         }));
 
         spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger), Arc::clone(&socket));
@@ -480,6 +592,7 @@ impl ControlService {
     pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         if update.motor_id >= MOTOR_COUNT {
             bail!("motor_id {} out of range", update.motor_id);
         }
@@ -495,6 +608,7 @@ impl ControlService {
 
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         for (motor_id, logical) in logical_values.into_iter().enumerate() {
             apply_motor_target(&mut state, motor_id, logical);
         }
@@ -505,6 +619,7 @@ impl ControlService {
     pub async fn set_motor_target_norm(&self, motor_id: usize, norm: f32) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         if motor_id >= MOTOR_COUNT {
             bail!("motor_id {} out of range", motor_id);
         }
@@ -520,6 +635,7 @@ impl ControlService {
 
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         for (motor_id, norm) in norm_values.into_iter().enumerate() {
             apply_motor_target_norm(&mut state, motor_id, norm);
         }
@@ -530,6 +646,7 @@ impl ControlService {
     pub async fn center_all(&self) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         let channels = state.channels.clone();
         for (index, channel) in channels.iter().enumerate() {
             state.target_logical[index] = channel.neutral_logical;
@@ -538,9 +655,13 @@ impl ControlService {
         Ok(build_runtime_state(&state))
     }
 
+    /// Applies a preset via the eased transition layer (default 600ms
+    /// min_jerk) instead of snapping `target_applied` straight to the
+    /// preset's values; the base rate limiter still runs underneath.
     pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         let preset = state
             .expression_presets
             .iter()
@@ -548,9 +669,13 @@ impl ControlService {
             .cloned()
             .ok_or_else(|| anyhow!("expression preset not found: {preset_id}"))?;
 
-        for (motor_id, norm_value) in preset.norm.iter().copied().enumerate() {
-            apply_motor_target_norm(&mut state, motor_id, norm_value);
-        }
+        let end_applied = compute_preset_target_applied(&state.channels, &preset.norm);
+        start_transition(
+            &mut state,
+            end_applied,
+            DEFAULT_PRESET_TRANSITION,
+            DEFAULT_PRESET_EASING,
+        );
 
         Ok(build_runtime_state(&state))
     }
@@ -569,6 +694,7 @@ impl ControlService {
     ) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
         ensure_manual_writable(&state)?;
+        cancel_automated_motion(&mut state);
         let preset = state
             .expression_presets
             .iter()
@@ -581,15 +707,14 @@ impl ControlService {
             .find(|preset| preset.id == "rest")
             .map(|preset| preset.norm.clone());
 
-        let intensity = intensity.clamp(0.0, 1.0);
-        for (motor_id, target_norm) in preset.norm.iter().copied().enumerate() {
-            let neutral = neutral_norm
-                .as_ref()
-                .map(|norm| norm[motor_id])
-                .unwrap_or(0.0);
-            let scaled = neutral + intensity * (target_norm - neutral);
-            apply_motor_target_norm(&mut state, motor_id, scaled);
-        }
+        let scaled_norm = scale_preset_norm(&preset.norm, neutral_norm.as_deref(), intensity);
+        let end_applied = compute_preset_target_applied(&state.channels, &scaled_norm);
+        start_transition(
+            &mut state,
+            end_applied,
+            DEFAULT_PRESET_TRANSITION,
+            DEFAULT_PRESET_EASING,
+        );
 
         Ok(build_runtime_state(&state))
     }
@@ -617,8 +742,9 @@ impl ControlService {
     /// heartbeat interpolates + dispatches them.
     pub async fn nod(&self) -> Result<RuntimeState> {
         {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             ensure_manual_writable(&state)?;
+            cancel_automated_motion(&mut state);
         }
 
         // "Up" lifts motor 30 by increasing its angle; motor 31 mirrors it.
@@ -635,6 +761,79 @@ impl ControlService {
         tokio::time::sleep(NOD_PHASE_DWELL).await;
 
         Ok(self.runtime_state().await)
+    }
+
+    pub async fn list_sequences(&self) -> Vec<SequenceSummary> {
+        let state = self.state.lock().await;
+        state
+            .sequences
+            .iter()
+            .map(|sequence| SequenceSummary {
+                id: sequence.id.clone(),
+                label: sequence.label.clone(),
+                step_count: sequence.steps.len(),
+                loop_playback: sequence.loop_playback,
+            })
+            .collect()
+    }
+
+    pub async fn sequence_playback_status(&self) -> SequencePlaybackStatus {
+        let state = self.state.lock().await;
+        match &state.sequence_playback {
+            Some(playback) => SequencePlaybackStatus {
+                playing: true,
+                sequence_id: Some(playback.sequence_id.clone()),
+                label: Some(playback.label.clone()),
+                step_index: Some(playback.step_index),
+                total_steps: Some(playback.total_steps),
+            },
+            None => SequencePlaybackStatus {
+                playing: false,
+                sequence_id: None,
+                label: None,
+                step_index: None,
+                total_steps: None,
+            },
+        }
+    }
+
+    /// Starts playback in the background (driven by `run_sequence_playback`,
+    /// itself paced by the tick loop's transition layer). Not playable while
+    /// External is active -- sequences are a Manual-source behavior.
+    pub async fn play_sequence(&self, sequence_id: &str) -> Result<()> {
+        let (sequence, generation) = {
+            let mut state = self.state.lock().await;
+            ensure_manual_writable(&state)?;
+            let sequence = state
+                .sequences
+                .iter()
+                .find(|sequence| sequence.id == sequence_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("sequence not found: {sequence_id}"))?;
+
+            cancel_automated_motion(&mut state);
+            state.playback_generation = state.playback_generation.wrapping_add(1);
+            let generation = state.playback_generation;
+            state.sequence_playback = Some(SequencePlaybackState {
+                sequence_id: sequence.id.clone(),
+                label: sequence.label.clone(),
+                step_index: 0,
+                total_steps: sequence.steps.len(),
+            });
+            (sequence, generation)
+        };
+
+        let state_handle = Arc::clone(&self.state);
+        tauri::async_runtime::spawn(run_sequence_playback(state_handle, sequence, generation));
+        Ok(())
+    }
+
+    /// Stops playback (if any) and clears whatever transition it was
+    /// mid-way through; targets stay exactly where they are.
+    pub async fn stop_sequence(&self) -> RuntimeState {
+        let mut state = self.state.lock().await;
+        cancel_automated_motion(&mut state);
+        build_runtime_state(&state)
     }
 
     pub async fn runtime_state(&self) -> RuntimeState {
@@ -763,6 +962,22 @@ impl AppState {
         self.service.wink().await
     }
 
+    pub async fn list_sequences(&self) -> Vec<SequenceSummary> {
+        self.service.list_sequences().await
+    }
+
+    pub async fn sequence_playback_status(&self) -> SequencePlaybackStatus {
+        self.service.sequence_playback_status().await
+    }
+
+    pub async fn play_sequence(&self, sequence_id: &str) -> Result<()> {
+        self.service.play_sequence(sequence_id).await
+    }
+
+    pub async fn stop_sequence(&self) -> RuntimeState {
+        self.service.stop_sequence().await
+    }
+
     pub async fn runtime_state(&self) -> RuntimeState {
         self.service.runtime_state().await
     }
@@ -791,6 +1006,63 @@ fn load_config(app_dir: &Path) -> Result<ConfigFile> {
     let config = serde_json::from_str::<ConfigFile>(&raw)
         .with_context(|| format!("failed to parse motor config {}", config_path.display()))?;
     Ok(config)
+}
+
+/// Loads every `sequences/*.json` file. Unlike `motor_config.json`, a
+/// missing directory or an individual malformed file doesn't abort startup
+/// -- these are user-authored during a session, so one bad file should not
+/// take down the rest of the (otherwise working) app; it's logged and
+/// skipped instead.
+fn load_sequences(app_dir: &Path) -> Vec<SequenceDef> {
+    let dir = app_dir.join(SEQUENCES_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            info!("no sequences directory at {}: {error}", dir.display());
+            return Vec::new();
+        }
+    };
+
+    let mut sequences = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                warn!("failed to read sequence file {}: {error}", path.display());
+                continue;
+            }
+        };
+        let sequence = match serde_json::from_str::<SequenceDef>(&raw) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                warn!("failed to parse sequence file {}: {error}", path.display());
+                continue;
+            }
+        };
+        if sequence.steps.is_empty() {
+            warn!(
+                "sequence '{}' in {} has no steps, skipping",
+                sequence.id,
+                path.display()
+            );
+            continue;
+        }
+        if !ids.insert(sequence.id.clone()) {
+            warn!(
+                "duplicate sequence id '{}' in {}, skipping",
+                sequence.id,
+                path.display()
+            );
+            continue;
+        }
+        sequences.push(sequence);
+    }
+    sequences
 }
 
 fn normalize_channels(channels: Vec<MotorChannel>) -> Result<Vec<MotorChannel>> {
@@ -930,6 +1202,69 @@ fn apply_motor_target_norm(state: &mut InnerState, motor_id: usize, norm: f32) {
     apply_motor_target_with_applied(state, motor_id, logical, applied);
 }
 
+/// Bipolar norm -> applied per channel, mirroring `apply_motor_target_norm`'s
+/// per-channel semantics (disabled channels pin to neutral) but returning a
+/// plain vector instead of mutating state, so callers can compute a
+/// transition's end point before committing to it.
+fn compute_preset_target_applied(channels: &[MotorChannel], norm: &[f32]) -> Vec<f32> {
+    channels
+        .iter()
+        .zip(norm.iter())
+        .map(|(channel, &value)| {
+            if channel.enabled {
+                channel.norm_to_applied(value)
+            } else {
+                channel.neutral_applied
+            }
+        })
+        .collect()
+}
+
+/// Scales a preset's norm vector towards a neutral reference (the `rest`
+/// preset's own norm, or 0 per channel if there is no `rest` preset) by
+/// `intensity` -- the same semantics as `apply_expression_preset_scaled`,
+/// shared here so the sequence player can reuse it per step.
+fn scale_preset_norm(norm: &[f32], neutral_norm: Option<&[f32]>, intensity: f32) -> Vec<f32> {
+    let intensity = intensity.clamp(0.0, 1.0);
+    norm.iter()
+        .enumerate()
+        .map(|(motor_id, &target)| {
+            let neutral = neutral_norm.map(|values| values[motor_id]).unwrap_or(0.0);
+            neutral + intensity * (target - neutral)
+        })
+        .collect()
+}
+
+/// Starts (or replaces) the eased transition layer. Manual writes bypass
+/// this entirely; only preset application and the sequence player use it.
+fn start_transition(
+    state: &mut InnerState,
+    end_applied: Vec<f32>,
+    duration: Duration,
+    easing: EasingKind,
+) {
+    state.active_transition = Some(ActiveTransition {
+        start_applied: state.current_applied.clone(),
+        end_applied,
+        started_at: Instant::now(),
+        duration: duration.max(Duration::from_millis(1)),
+        easing,
+    });
+}
+
+/// Every manual command entry point calls this first (after the
+/// External-source guard): a fresh manual command always wins over whatever
+/// automated motion -- an easing preset transition and/or a running
+/// sequence -- was in flight. Bumping `playback_generation` is how the
+/// sequence player's background task notices it has been superseded and
+/// exits instead of continuing to drive targets underneath the user.
+fn cancel_automated_motion(state: &mut InnerState) {
+    state.active_transition = None;
+    if state.sequence_playback.take().is_some() {
+        state.playback_generation = state.playback_generation.wrapping_add(1);
+    }
+}
+
 fn maybe_apply_jaw_coupling(state: &mut InnerState, updated_motor_id: usize) {
     let Some(jaw_coupling) = state.jaw_coupling.clone() else {
         return;
@@ -1021,6 +1356,115 @@ fn step_towards(current: f32, target: f32) -> f32 {
     }
 }
 
+/// Recomputes `target_applied`/`target_logical` from the active transition's
+/// eased curve at the current wall-clock time, then clears the transition
+/// once it reaches its end. `step_towards` (the base rate limiter) still
+/// runs afterwards every tick regardless -- this only ever *sets a target*,
+/// never a raw applied value.
+fn advance_active_transition(state: &mut InnerState) {
+    let Some(transition) = state.active_transition.clone() else {
+        return;
+    };
+
+    let elapsed = transition.started_at.elapsed().as_secs_f32();
+    let duration = transition.duration.as_secs_f32();
+    let t = (elapsed / duration).clamp(0.0, 1.0);
+    let eased = transition.easing.ease(t);
+
+    for motor_id in 0..MOTOR_COUNT {
+        let start = transition.start_applied[motor_id];
+        let end = transition.end_applied[motor_id];
+        let applied = start + (end - start) * eased;
+        let offset = state.channels[motor_id].offset;
+        state.target_applied[motor_id] = applied;
+        state.target_logical[motor_id] = applied - offset;
+    }
+
+    if t >= 1.0 {
+        state.active_transition = None;
+    }
+}
+
+/// Drives one `play_sequence` call end to end. Every step starts a
+/// transition (reusing the exact same path as a manual preset click) then
+/// sleeps out `transition_ms + hold_ms`; before starting each new step (and
+/// right after waking from the sleep) it re-checks `playback_generation` so
+/// a manual write, `stop_sequence`, or a competing `play_sequence` call
+/// preempts it immediately rather than fighting for control on the next
+/// tick.
+async fn run_sequence_playback(
+    state: Arc<Mutex<InnerState>>,
+    sequence: SequenceDef,
+    generation: u64,
+) {
+    loop {
+        for (index, step) in sequence.steps.iter().enumerate() {
+            let wait = {
+                let mut guard = state.lock().await;
+                if guard.playback_generation != generation {
+                    return;
+                }
+                if guard.control_source == ControlSource::External {
+                    guard.sequence_playback = None;
+                    return;
+                }
+
+                let Some(preset) = guard
+                    .expression_presets
+                    .iter()
+                    .find(|preset| preset.id == step.preset)
+                    .cloned()
+                else {
+                    warn!(
+                        "sequence '{}' step {} references unknown preset '{}', stopping playback",
+                        sequence.id, index, step.preset
+                    );
+                    guard.sequence_playback = None;
+                    return;
+                };
+
+                let neutral_norm = guard
+                    .expression_presets
+                    .iter()
+                    .find(|preset| preset.id == "rest")
+                    .map(|preset| preset.norm.clone());
+                let scaled_norm =
+                    scale_preset_norm(&preset.norm, neutral_norm.as_deref(), step.intensity);
+                let end_applied = compute_preset_target_applied(&guard.channels, &scaled_norm);
+                start_transition(
+                    &mut guard,
+                    end_applied,
+                    Duration::from_millis(step.transition_ms),
+                    step.easing,
+                );
+
+                if let Some(playback) = &mut guard.sequence_playback {
+                    playback.step_index = index;
+                }
+
+                Duration::from_millis(step.transition_ms) + Duration::from_millis(step.hold_ms)
+            };
+
+            tokio::time::sleep(wait).await;
+
+            let guard = state.lock().await;
+            if guard.playback_generation != generation {
+                return;
+            }
+        }
+
+        let mut guard = state.lock().await;
+        if guard.playback_generation != generation {
+            return;
+        }
+        if !sequence.loop_playback {
+            guard.sequence_playback = None;
+            return;
+        }
+        // Looping: fall through to the outer loop and replay from step 0.
+    }
+}
+
 fn spawn_udp_heartbeat(
     state: Arc<Mutex<InnerState>>,
     logger: Arc<FrameLogger>,
@@ -1053,6 +1497,8 @@ fn spawn_udp_heartbeat(
                         info!("external control source timed out, falling back to Manual");
                     }
                 }
+
+                advance_active_transition(state);
 
                 if let Some(endpoint) = state.endpoint {
                     for index in 0..MOTOR_COUNT {
@@ -1379,6 +1825,10 @@ mod tests {
             external_last_seq: None,
             external_last_frame_at: None,
             external_fps_ema: 0.0,
+            sequences: Vec::new(),
+            active_transition: None,
+            sequence_playback: None,
+            playback_generation: 0,
         }
     }
 
@@ -1428,6 +1878,10 @@ mod tests {
             external_last_seq: None,
             external_last_frame_at: None,
             external_fps_ema: 0.0,
+            sequences: Vec::new(),
+            active_transition: None,
+            sequence_playback: None,
+            playback_generation: 0,
         }
     }
 
@@ -1639,6 +2093,185 @@ mod tests {
         assert!(
             !status_timed_out.active,
             "should fall back to Manual after the timeout"
+        );
+    }
+
+    #[test]
+    fn easing_curves_hit_anchors_and_stay_in_range() {
+        for kind in [
+            EasingKind::Linear,
+            EasingKind::EaseInOutCubic,
+            EasingKind::MinJerk,
+        ] {
+            approx(kind.ease(0.0), 0.0);
+            approx(kind.ease(1.0), 1.0);
+            let mid = kind.ease(0.5);
+            assert!(
+                (0.0..=1.0).contains(&mid),
+                "{kind:?} at t=0.5 out of range: {mid}"
+            );
+        }
+        // min_jerk's defining property vs. linear/cubic: zero velocity *and*
+        // zero acceleration at both ends (10t^3-15t^4+6t^5 has a double root
+        // at 0 and 1), which is why it's picked as the smoother default.
+        approx(
+            EasingKind::MinJerk.ease(0.1),
+            0.1_f32.powi(3) * (10.0 - 15.0 * 0.1 + 6.0 * 0.1 * 0.1),
+        );
+    }
+
+    #[test]
+    fn scale_preset_norm_interpolates_towards_neutral_reference() {
+        let target = vec![1.0_f32; MOTOR_COUNT];
+        let mut neutral = vec![0.0_f32; MOTOR_COUNT];
+        neutral[0] = 0.4;
+
+        let at_zero = scale_preset_norm(&target, Some(&neutral), 0.0);
+        approx(at_zero[0], 0.4);
+        approx(at_zero[1], 0.0);
+
+        let at_one = scale_preset_norm(&target, Some(&neutral), 1.0);
+        approx(at_one[0], 1.0);
+        approx(at_one[1], 1.0);
+
+        let at_half = scale_preset_norm(&target, Some(&neutral), 0.5);
+        approx(at_half[0], 0.7); // 0.4 + 0.5*(1.0-0.4)
+
+        // No `rest` preset -> falls back to a plain 0 neutral per channel.
+        let no_rest = scale_preset_norm(&target, None, 0.5);
+        approx(no_rest[0], 0.5);
+    }
+
+    #[test]
+    fn compute_preset_target_applied_pins_disabled_channels_to_neutral() {
+        let mut state = plain_state();
+        state.channels[9] = MotorChannel {
+            enabled: false,
+            ..ch_with_id(9, 0.0, 100.0, 40.0)
+        };
+        let norm = vec![1.0_f32; MOTOR_COUNT]; // would otherwise drive channel 9 to max_applied
+        let applied = compute_preset_target_applied(&state.channels, &norm);
+        approx(applied[9], 40.0);
+    }
+
+    #[test]
+    fn advance_active_transition_interpolates_and_clears_on_completion() {
+        let mut state = plain_state();
+        state.channels[4] = ch_with_id(4, 0.0, 100.0, 0.0);
+        state.current_applied[4] = 0.0;
+
+        let mut end = state.current_applied.clone();
+        end[4] = 100.0;
+        state.active_transition = Some(ActiveTransition {
+            start_applied: state.current_applied.clone(),
+            end_applied: end,
+            // Backdated so elapsed/duration lands mid-way through the
+            // transition without a real sleep.
+            started_at: Instant::now() - Duration::from_millis(300),
+            duration: Duration::from_millis(600),
+            easing: EasingKind::Linear,
+        });
+
+        advance_active_transition(&mut state);
+        approx(state.target_applied[4], 50.0); // linear, t=0.5
+        assert!(
+            state.active_transition.is_some(),
+            "transition should still be running at t=0.5"
+        );
+
+        if let Some(transition) = &mut state.active_transition {
+            transition.started_at = Instant::now() - Duration::from_millis(1000);
+        }
+        advance_active_transition(&mut state);
+        approx(state.target_applied[4], 100.0);
+        assert!(
+            state.active_transition.is_none(),
+            "transition should clear once it reaches t=1.0"
+        );
+    }
+
+    #[test]
+    fn cancel_automated_motion_clears_transition_and_bumps_generation_only_if_playing() {
+        let mut state = plain_state();
+        state.active_transition = Some(ActiveTransition {
+            start_applied: state.target_applied.clone(),
+            end_applied: state.target_applied.clone(),
+            started_at: Instant::now(),
+            duration: Duration::from_millis(100),
+            easing: EasingKind::Linear,
+        });
+
+        // No sequence playing: generation is untouched.
+        let generation_before = state.playback_generation;
+        cancel_automated_motion(&mut state);
+        assert!(state.active_transition.is_none());
+        assert_eq!(state.playback_generation, generation_before);
+
+        state.active_transition = Some(ActiveTransition {
+            start_applied: state.target_applied.clone(),
+            end_applied: state.target_applied.clone(),
+            started_at: Instant::now(),
+            duration: Duration::from_millis(100),
+            easing: EasingKind::Linear,
+        });
+        state.sequence_playback = Some(SequencePlaybackState {
+            sequence_id: "demo".to_string(),
+            label: "Demo".to_string(),
+            step_index: 0,
+            total_steps: 3,
+        });
+        cancel_automated_motion(&mut state);
+        assert!(state.active_transition.is_none());
+        assert!(state.sequence_playback.is_none());
+        assert_eq!(state.playback_generation, generation_before + 1);
+    }
+
+    // End-to-end: play a real sequence file (src-tauri/sequences/demo_1.json)
+    // against a real ControlService, then verify a manual write preempts
+    // playback immediately (per README: dragging a slider mid-sequence stops
+    // it and returns to Manual) rather than fighting the player for control.
+    #[tokio::test]
+    async fn sequence_playback_is_preempted_by_a_manual_write() {
+        let log_dir = std::env::temp_dir().join(format!(
+            "bionic_face_test_logs_{}_{}",
+            std::process::id(),
+            "sequence_playback_is_preempted_by_a_manual_write"
+        ));
+        let app_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = ControlService::new(log_dir, app_dir)
+            .await
+            .expect("failed to init ControlService");
+
+        let sequences = service.list_sequences().await;
+        assert!(
+            sequences.iter().any(|s| s.id == "demo_1"),
+            "expected src-tauri/sequences/demo_1.json to be loaded"
+        );
+
+        service
+            .play_sequence("demo_1")
+            .await
+            .expect("play_sequence should start");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = service.sequence_playback_status().await;
+        assert!(
+            status.playing,
+            "sequence should be playing shortly after starting"
+        );
+        assert_eq!(status.sequence_id, Some("demo_1".to_string()));
+
+        service
+            .set_motor_target(MotorTargetUpdate {
+                motor_id: 0,
+                logical_value: 0.0,
+            })
+            .await
+            .expect("manual write should succeed and preempt playback");
+
+        let status_after = service.sequence_playback_status().await;
+        assert!(
+            !status_after.playing,
+            "manual write should stop sequence playback"
         );
     }
 }

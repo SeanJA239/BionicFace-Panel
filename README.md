@@ -200,6 +200,71 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 - **配置**：集中在 `raspi/config.py` 的 `IDLE_BEHAVIOR` 字典，导出进 `motor_config.json` 的 `idleBehavior` 字段（每个键都有默认值，缺失也能正常加载）。运行时还有一个独立于配置文件的**总开关**：Tauri 命令 `set_idle_behavior_enabled(enabled)`，前端顶部有对应的勾选框；关闭时如果正处于 `Idle` 会立即退回 `Manual`。
 - External 源激活时待机行为完全不生效（`Idle` 只能从 `Manual` 进入，`External` 会话期间连判定条件都不会检查）。
 
+## MediaPipe 表情跟随管线
+
+[tools/mediapipe_driver.py](tools/mediapipe_driver.py) 是一个完全独立的 Python 进程：读摄像头 → MediaPipe Face Landmarker（含 blendshapes）→ 数据驱动的映射表把 blendshape 分数换算成 32 通道系数 → 每通道各自一个 One Euro Filter 平滑 → 固定 30Hz 通过任务 4 的外部输入端口（默认 `127.0.0.1:6100`）发给 Rust。它和上位机之间**只有**这一条 UDP 系数流，不直接控制树莓派、不绕过 `ControlService`。
+
+### 依赖安装
+
+```bash
+python3 -m pip install mediapipe opencv-python pygame
+```
+
+### 模型文件下载
+
+下载 `face_landmarker.task`（float16 版本）：
+
+```bash
+curl -L -o tools/face_landmarker.task \
+  https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
+```
+
+其它可选精度/版本见 [Google AI Edge 的 Face Landmarker 模型页](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker)。`--model` 参数可指向任意路径，默认是 `tools/face_landmarker.task`。
+
+### blendshape → 通道映射
+
+映射表是 `mediapipe_driver.py` 顶部的 `BLENDSHAPE_MAP`：`{channel_id: [(blendshape_name, weight, bias), ...]}`，一个通道的系数 = 钳位到 `[0,1]` 的 `Σ(weight * blendshape_score + bias)`。首版覆盖：
+
+- `jawOpen → 25`（主开合轴；26/27 故意不映射、发 `null`，交给 Rust 现有的下巴联动从 25 联动出来）
+- `mouthSmileLeft/Right`、`mouthFrownLeft/Right` → 嘴角四通道 `17/18/19/20`（微笑抬、皱眉压，方向相反）
+- `browInnerUp`、`browDownLeft/Right` → 眉毛 `0-3`
+- `eyeBlinkLeft/Right` → 眼睑 `9/10` 与 `11/12`
+- `eyeLookIn/Out/Up/Down`（左右平均）→ 共享注视通道 `8/13`
+- `mouthPucker`、`mouthUpperUp*`/`mouthLowerDown*` → 上下唇 `14-16`/`21-23`
+
+每个通道 0/1 的物理含义（"0=？1=？"）是从 `config.py` 的限位/命名推断的猜测，不确定的地方在映射表里用行内注释标了 **TODO**，留给硬件联调时用 `--preview` 实测校正（尤其是眼睑"闭合"方向、注视轴符号、嘴角上下沿的抬/压关系）。MediaPipe blendshape 名字里的 Left/Right 是**受试者自己的左右**，假定和本仓库通道命名的左右一致（也是受试者自己的左右）——镜像颠倒的话交换映射表里对应的 Left/Right 名字即可。
+
+### 平滑：One Euro Filter
+
+每个映射到的通道各自一个 `OneEuroFilter` 实例（约 40 行，`min_cutoff`/`beta`/`d_cutoff` 三个参数），命令行可调：
+
+```bash
+python3 tools/mediapipe_driver.py --min-cutoff 1.0 --beta 0.007 --d-cutoff 1.0
+```
+
+### 调试预览
+
+```bash
+python3 tools/mediapipe_driver.py --preview
+```
+
+弹出窗口左侧是摄像头画面叠加 landmark 点，右侧是 32 通道里被映射到的那些的实时条形图，便于在没有硬件的情况下调映射权重和滤波参数。
+
+### 完整无硬件演示（三进程）
+
+```bash
+# 1. 可视化模拟器（替代树莓派）
+python3 tools/face_visualizer.py --port 6000
+
+# 2. 上位机面板，UDP Endpoint 填 127.0.0.1:6000
+npm run tauri dev
+
+# 3. 摄像头驱动（另开一个终端）
+python3 tools/mediapipe_driver.py --preview
+```
+
+启动第 3 步后，控制源应自动切到 External、面板滑条置灰；对着摄像头做表情，可视化脸应实时跟随且没有高频抖动；关掉 `mediapipe_driver.py`（或它断流）后，约 500ms 内控制权应自动回落 Manual，脸保持最后姿态不跳变。
+
 ## 通道禁用与脖子电机
 
 协议固定为 32 通道。30、31 两个脖子电机已随脖子结构恢复而重新启用，当前全部 32 个通道均参与标定。**但 30、31 尚未完成正式的运动范围标定**，`MOTOR_LIMITS` 暂时保守收紧到 `(75, 105)`（中位 90° 上下各 15°），后续完成标定后再放宽。
@@ -231,6 +296,7 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 | [raspi/export_config_json.py](raspi/export_config_json.py) | 配置导出脚本（Python + presets.json → Rust JSON） |
 | [raspi/servo_server.py](raspi/servo_server.py) | 树莓派 UDP 执行器（支持 `--dry-run`，无硬件时跳过 I2C，只打印帧率/摘要） |
 | [tools/face_visualizer.py](tools/face_visualizer.py) | 无硬件开发用：监听 UDP、渲染 2D 简笔人脸，可完全替代树莓派执行器 |
+| [tools/mediapipe_driver.py](tools/mediapipe_driver.py) | 摄像头表情跟随：MediaPipe blendshapes → 32 通道系数，发往任务4的外部输入端口 |
 | [src-tauri/sequences/](src-tauri/sequences) | 表情序列脚本（`*.json`），启动时扫描整个目录 |
 | [src-tauri/src/control.rs](src-tauri/src/control.rs) | Rust 控制核心（补偿、插值、联动、预设、缓动/序列、外部输入仲裁、心跳、日志） |
 | [src/App.tsx](src/App.tsx) | 前端控制台 UI |

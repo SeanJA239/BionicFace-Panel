@@ -172,7 +172,8 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 | [emotion.legacy.md](emotion.legacy.md) | 迁移前的原始物理角度预设，仅供参考，不参与导出 |
 | [raspi/migrate_presets_to_normalized.py](raspi/migrate_presets_to_normalized.py) | 一次性迁移脚本：`emotion.legacy.md` 角度 → `presets.json` 系数 |
 | [raspi/export_config_json.py](raspi/export_config_json.py) | 配置导出脚本（Python + presets.json → Rust JSON） |
-| [raspi/servo_server.py](raspi/servo_server.py) | 树莓派 UDP 执行器 |
+| [raspi/servo_server.py](raspi/servo_server.py) | 树莓派 UDP 执行器（支持 `--dry-run`，无硬件时跳过 I2C，只打印帧率/摘要） |
+| [tools/face_visualizer.py](tools/face_visualizer.py) | 无硬件开发用：监听 UDP、渲染 2D 简笔人脸，可完全替代树莓派执行器 |
 | [src-tauri/src/control.rs](src-tauri/src/control.rs) | Rust 控制核心（补偿、插值、联动、预设、心跳、日志） |
 | [src/App.tsx](src/App.tsx) | 前端控制台 UI |
 | [docs/setup_guide_zh.md](docs/setup_guide_zh.md) | 环境配置与部署文档 |

@@ -22,6 +22,8 @@ export type TransportStatus = {
   heartbeatHz: number;
 };
 
+export type ControlSource = "manual" | "external";
+
 export type RuntimeState = {
   endpoint: string | null;
   heartbeatHz: number;
@@ -32,6 +34,16 @@ export type RuntimeState = {
   // Bipolar normalized (-1..1) views, derived per channel (phase 1).
   targetNorm: number[];
   currentNorm: number[];
+  controlSource: ControlSource;
+};
+
+export type ExternalInputStatus = {
+  port: number;
+  active: boolean;
+  lastSeq: number | null;
+  fps: number;
+  timeoutMs: number;
+  controlSource: ControlSource;
 };
 
 export type UdpControlFrame = {
@@ -117,6 +129,14 @@ export async function wink(): Promise<RuntimeState> {
 
 export async function getRuntimeState(): Promise<RuntimeState> {
   return safeInvoke("get_runtime_state");
+}
+
+export async function getExternalInputStatus(): Promise<ExternalInputStatus> {
+  return safeInvoke("get_external_input_status");
+}
+
+export async function forceManualControl(): Promise<RuntimeState> {
+  return safeInvoke("force_manual_control");
 }
 
 export async function getLastFrame(): Promise<UdpControlFrame | null> {

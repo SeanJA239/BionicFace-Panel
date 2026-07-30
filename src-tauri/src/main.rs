@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use control::{
-    AppState, ExpressionPresetSummary, MotorChannel, MotorTargetUpdate, RuntimeState,
-    TransportStatus, UdpControlFrame,
+    AppState, ExpressionPresetSummary, ExternalInputStatus, MotorChannel, MotorTargetUpdate,
+    RuntimeState, TransportStatus, UdpControlFrame,
 };
 use tauri::{Manager, State};
 
@@ -90,7 +90,7 @@ async fn set_all_targets_norm(
 
 #[tauri::command]
 async fn center_all(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
-    Ok(state.center_all().await)
+    state.center_all().await.map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -129,6 +129,18 @@ async fn wink(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
 #[tauri::command]
 async fn get_runtime_state(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     Ok(state.runtime_state().await)
+}
+
+#[tauri::command]
+async fn get_external_input_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ExternalInputStatus, String> {
+    Ok(state.external_input_status().await)
+}
+
+#[tauri::command]
+async fn force_manual_control(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    Ok(state.force_manual_control().await)
 }
 
 #[tauri::command]
@@ -193,6 +205,8 @@ pub fn run() {
             nod,
             wink,
             get_runtime_state,
+            get_external_input_status,
+            force_manual_control,
             get_last_frame,
             flush_current_frame,
         ])

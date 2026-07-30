@@ -126,6 +126,10 @@ def main() -> None:
         "channels": channels,
         "jawCoupling": build_jaw_coupling(module),
         "expressionPresets": load_expression_presets(PRESETS_PATH),
+        "externalInput": {
+            "port": int(getattr(module, "EXTERNAL_INPUT_PORT", 6100)),
+            "timeoutMs": int(getattr(module, "EXTERNAL_INPUT_TIMEOUT_MS", 500)),
+        },
     }
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

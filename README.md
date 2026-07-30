@@ -43,6 +43,7 @@ React 滑条 --invoke--> Rust ControlService --UDP JSON--> Raspberry Pi --I2C-->
 - 应用表情预设：一次性把 32 个通道设置为预设定义的应用角度，覆盖联动/滑条当前值
 - 通过 UDP JSON 把 32 通道最终角度发往树莓派（心跳与手动 flush 共用一个 socket）
 - 记录发送日志（JSONL + CSV 双份），只记录运动帧，停稳或每秒批量刷盘一次，减少 SD 卡写入
+- 监听独立的外部系数输入端口（默认 6100），和 Manual 来源仲裁出唯一当前控制源（详见"控制源仲裁与外部输入"）
 
 ### 树莓派执行器（[raspi/servo_server.py](raspi/servo_server.py)）
 
@@ -142,6 +143,28 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 原因：`rest`（静息）预设的 32 个系数本身大多不是 `0`——静息姿态和每个电机独立标定出来的物理中位并不是一回事（例如 `eyebrow_right_inner` 的 `rest` 系数是 `-0.25` 而不是 `0`）。如果把强度缩放锚定在 `norm=0`，`intensity=0` 会让脸回到一堆互不相关的电机中位，而不是回到静息表情；锚定在 `rest` 的系数向量上，`intensity=0` 才真正回到静息脸，`intensity=1` 是完整表情，中间是两者的线性插值。
 
 > **与本任务文档原始描述的差异**：文档最初设想的是单极 `[0, 1]` 系数 `coefficient = (applied - min_applied) / (max_applied - min_applied)`。仓库在此之前的"norm"系列提交（见 `git log`）已经实现并全面接入了一套双极 `[-1, 1]`、以校准中位为锚点、两侧跨度可不对称的归一化方案，贯穿滑条、下巴联动、点头动作。按仓库现状优先的约定，本次迁移复用了这套已有方案而不是另起一套不兼容的单极系数，`DISABLED_MOTORS` 的占位值相应从文档里的 `0.5` 改为 `0.0`（该方案里的"中位"就是 `0`）。
+
+## 控制源仲裁与外部输入
+
+除了前端滑条/预设/序列（统称 **Manual**），Rust 端还监听一个独立的 UDP 端口，接收外部进程（例如 [tools/mediapipe_driver.py](tools/mediapipe_driver.py)）实时推送的 32 通道系数流（**External**）。两者互斥，由 `control.rs` 里的控制源仲裁裁决：
+
+- **协议**（默认端口 `6100`，另一个独立于树莓派 6000 端口的 socket）：
+
+  ```json
+  { "seq": 123, "timestampNs": 1742600000000000000, "coefficients": [32 个 0..1 浮点或 null] }
+  ```
+
+  - `coefficients[i] = null` 表示该帧不驱动通道 `i`（保持当前目标不变）。
+  - 每个非空系数钳位到 `[0, 1]` 后，**线性映射整段限位**（`applied = minApplied + c * (maxApplied - minApplied)`），得到 applied 目标——这是单极映射，和表情预设用的双极 `norm` 空间是两套独立的、各自成立的表示：预设需要"以校准中位为锚点"的相对语义，外部输入流只需要一个简单的、和常见 ML 输出（比如 blendshape 0..1）直接对应的绝对映射。
+  - `seq` 必须严格递增，回退或重复的帧会被丢弃（防止乱序帧覆盖更新的目标）。
+  - 禁用通道（`DISABLED_MOTORS`）忽略外部系数。
+  - 应用后仍会触发下巴联动重算，并走现有的限速插值/UDP 心跳路径——外部输入和滑条最终共用同一条"写目标数组"管线，不存在绕过 `ControlService` 的第二条链路。
+
+- **仲裁规则**：任意一帧合法外部系数到达即把控制源切到 `External`；此时后端会拒绝所有 Manual 写操作（滑条、预设、`center_all`、`nod`、`wink`，均返回错误），前端同步把这些控件置灰。超过超时时间（默认 `500ms`，`config.py` 的 `EXTERNAL_INPUT_TIMEOUT_MS`）没有新帧，100Hz 心跳循环会在下一个 tick 自动把控制源降回 `Manual`——目标保持断流前的最后值，不会跳变回中位。也可以调用 `force_manual_control` 立即强制切回（如果外部源仍在发送，它的下一帧会重新抢回 `External`，这只是一次性的"帮我拿回面板"操作，不是永久屏蔽）。
+- **配置**：`raspi/config.py` 的 `EXTERNAL_INPUT_PORT` / `EXTERNAL_INPUT_TIMEOUT_MS`，导出后进入 `motor_config.json` 的 `externalInput` 字段；缺省时 Rust 侧回退到 `6100`/`500ms`。
+- **Tauri 命令**：`get_external_input_status`（端口、是否 active、最近 seq、EMA 帧率、超时配置）、`force_manual_control`（立即切回 Manual）。前端每 300ms 轮询一次 `get_runtime_state` + `get_external_input_status`，用于顶部"Control source"状态展示和控件置灰，即使用户没有手动操作也能实时感知外部驱动的接入/断开。
+
+> 三态仲裁里预留了第三个源 `Idle`（Manual 且长时间静止，触发待机噪声/眨眼），但目前只接入了 `Manual`/`External`——`Idle` 的判定条件依赖尚不存在的序列播放器与待机调度器，会在那两个任务落地时再扩展 `ControlSource` 枚举，这里不提前定义用不到的状态。
 
 ## 通道禁用与脖子电机
 

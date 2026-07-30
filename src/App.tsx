@@ -5,6 +5,8 @@ import {
   connectPi,
   disconnectPi,
   flushCurrentFrame,
+  forceManualControl,
+  getExternalInputStatus,
   getLastFrame,
   getMotorChannels,
   getRuntimeState,
@@ -14,6 +16,7 @@ import {
   setMotorTarget,
   wink,
   type ExpressionPresetSummary,
+  type ExternalInputStatus,
   type MotorChannel,
   type RuntimeState,
   type UdpControlFrame,
@@ -24,6 +27,10 @@ const MOTOR_COUNT = 32;
 // Slider drags fire change events far faster than the IPC round-trip is
 // worth; pending values are coalesced and sent at most ~30 times per second.
 const SEND_INTERVAL_MS = 33;
+// Polls runtime state (and thus control_source) so the panel notices an
+// external driver claiming control, or relinquishing it, without the user
+// having to trigger a manual action first.
+const RUNTIME_POLL_INTERVAL_MS = 300;
 
 function fallbackRuntime(): RuntimeState {
   return {
@@ -35,6 +42,7 @@ function fallbackRuntime(): RuntimeState {
     currentApplied: Array(MOTOR_COUNT).fill(0),
     targetNorm: Array(MOTOR_COUNT).fill(0),
     currentNorm: Array(MOTOR_COUNT).fill(0),
+    controlSource: "manual",
   };
 }
 
@@ -43,6 +51,7 @@ type SliderRowProps = {
   logicalValue: number;
   appliedValue: number;
   normValue: number;
+  locked: boolean;
   onChange: (motorId: number, value: number) => void;
 };
 
@@ -51,10 +60,12 @@ const SliderRow = memo(function SliderRow({
   logicalValue,
   appliedValue,
   normValue,
+  locked,
   onChange,
 }: SliderRowProps) {
+  const disabled = !channel.enabled || locked;
   return (
-    <label className={channel.enabled ? "slider-row dense" : "slider-row dense disabled"}>
+    <label className={disabled ? "slider-row dense disabled" : "slider-row dense"}>
       <div className="slider-meta">
         <strong>
           #{channel.id} {channel.name}
@@ -65,6 +76,9 @@ const SliderRow = memo(function SliderRow({
         {!channel.enabled ? (
           <span className="channel-badge">disabled in config</span>
         ) : null}
+        {channel.enabled && locked ? (
+          <span className="channel-badge">external control active</span>
+        ) : null}
       </div>
       <input
         type="range"
@@ -72,7 +86,7 @@ const SliderRow = memo(function SliderRow({
         max={channel.maxLogical}
         step={0.5}
         value={logicalValue}
-        disabled={!channel.enabled}
+        disabled={disabled}
         onChange={(event) => onChange(channel.id, Number(event.target.value))}
       />
       <div className="value-pair">
@@ -94,6 +108,8 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [presetIntensity, setPresetIntensity] = useState(1.0);
+  const [externalStatus, setExternalStatus] = useState<ExternalInputStatus | null>(null);
+  const isExternal = runtime.controlSource === "external";
   const pendingSendsRef = useRef(new Map<number, number>());
   const sendTimerRef = useRef<number | null>(null);
 
@@ -121,6 +137,32 @@ function App() {
 
     bootstrap();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      try {
+        const [runtimeState, status] = await Promise.all([getRuntimeState(), getExternalInputStatus()]);
+        setRuntime(runtimeState);
+        setExternalStatus(status);
+        if (runtimeState.controlSource === "external") {
+          setActivePresetId(null);
+        }
+      } catch {
+        // Transient IPC hiccups shouldn't spam the status line on every poll.
+      }
+    }, RUNTIME_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function handleForceManualControl() {
+    try {
+      const next = await forceManualControl();
+      setRuntime(next);
+      setStatus("Forced control source back to Manual");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
 
   async function refreshLastFrame() {
     try {
@@ -275,15 +317,20 @@ function App() {
             <button className="secondary" onClick={handleDisconnect}>
               Disconnect
             </button>
-            <button className="secondary" onClick={handleCenterAll}>
+            <button className="secondary" onClick={handleCenterAll} disabled={isExternal}>
               Center All
             </button>
-            <button className="secondary" onClick={handleNod}>
+            <button className="secondary" onClick={handleNod} disabled={isExternal}>
               Nod
             </button>
             <button className="secondary" onClick={handleFlush}>
               Flush
             </button>
+            {isExternal ? (
+              <button className="secondary" onClick={handleForceManualControl}>
+                Force Manual
+              </button>
+            ) : null}
           </div>
           {expressionPresets.length > 0 ? (
             <>
@@ -295,6 +342,7 @@ function App() {
                   max={1}
                   step={0.01}
                   value={presetIntensity}
+                  disabled={isExternal}
                   onChange={(event) => setPresetIntensity(Number(event.target.value))}
                 />
               </label>
@@ -303,6 +351,7 @@ function App() {
                   <button
                     className={activePresetId === preset.id ? "" : "secondary"}
                     key={preset.id}
+                    disabled={isExternal}
                     onClick={() =>
                       preset.id === "wink" ? handleWink() : handleApplyPreset(preset, presetIntensity)
                     }
@@ -314,6 +363,12 @@ function App() {
             </>
           ) : null}
           <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
+          <p className="status-line">
+            Control source: <strong>{isExternal ? "External" : "Manual"}</strong>
+            {isExternal && externalStatus
+              ? ` (port ${externalStatus.port}, ${externalStatus.fps.toFixed(1)} fps, seq ${externalStatus.lastSeq ?? "-"})`
+              : null}
+          </p>
           <p className="status-line muted">{status}</p>
         </div>
       </section>
@@ -338,6 +393,7 @@ function App() {
                 logicalValue={runtime.targetLogical[channel.id] ?? channel.neutralLogical}
                 appliedValue={runtime.currentApplied[channel.id] ?? channel.neutralApplied}
                 normValue={runtime.currentNorm[channel.id] ?? 0}
+                locked={isExternal}
                 onChange={handleSliderChange}
               />
             ))}

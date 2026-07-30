@@ -838,5 +838,9 @@
         0.0
       ]
     }
-  ]
+  ],
+  "externalInput": {
+    "port": 6100,
+    "timeoutMs": 500
+  }
 }

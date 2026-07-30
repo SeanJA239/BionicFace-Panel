@@ -11,6 +11,13 @@
 BOARD_ADDRESSES = [0x40, 0x41]
 UDP_PORT = 6000
 
+# External coefficient-stream input (see control.rs's ControlService): a
+# second UDP listener the PC side runs to accept driver processes (e.g.
+# tools/mediapipe_driver.py) feeding normalized [0,1] coefficients,
+# arbitrated against manual (slider/preset/sequence) control.
+EXTERNAL_INPUT_PORT = 6100
+EXTERNAL_INPUT_TIMEOUT_MS = 500
+
 MOTOR_NAMES = {
     0: "eyebrow_right_inner",
     1: "eyebrow_right_outer",

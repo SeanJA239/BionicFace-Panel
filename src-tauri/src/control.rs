@@ -4,7 +4,7 @@ use std::io::{BufWriter, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -14,6 +14,12 @@ use tracing::{info, warn};
 
 const MOTOR_COUNT: usize = 32;
 const HEARTBEAT_HZ: u64 = 100;
+const DEFAULT_EXTERNAL_INPUT_PORT: u16 = 6100;
+const DEFAULT_EXTERNAL_INPUT_TIMEOUT_MS: u64 = 500;
+// Smoothing factor for the external input fps estimate (EMA over inter-frame
+// gaps), not a hard averaging window, so a stalled source's last reading
+// simply stops updating rather than needing a ring buffer.
+const EXTERNAL_FPS_EMA_ALPHA: f32 = 0.2;
 // When all channels are settled the PCA9685 holds its PWM output, so frames
 // are only resent as a low-rate keepalive instead of at the full tick rate.
 const KEEPALIVE_TICK_DIVISOR: u64 = 10;
@@ -119,6 +125,8 @@ struct ConfigFile {
     channels: Vec<MotorChannel>,
     jaw_coupling: Option<JawCouplingConfig>,
     expression_presets: Vec<ExpressionPreset>,
+    #[serde(default)]
+    external_input: Option<ExternalInputConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +145,55 @@ struct JawCouplingConfig {
     // A ratio of -1.0 mirrors the master's full travel onto the slave's full travel,
     // regardless of how their physical degree ranges compare.
     slave_ratios: BTreeMap<usize, f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalInputConfig {
+    #[serde(default = "default_external_input_port")]
+    pub port: u16,
+    #[serde(default = "default_external_input_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_external_input_port() -> u16 {
+    DEFAULT_EXTERNAL_INPUT_PORT
+}
+
+fn default_external_input_timeout_ms() -> u64 {
+    DEFAULT_EXTERNAL_INPUT_TIMEOUT_MS
+}
+
+impl Default for ExternalInputConfig {
+    fn default() -> Self {
+        Self {
+            port: DEFAULT_EXTERNAL_INPUT_PORT,
+            timeout_ms: DEFAULT_EXTERNAL_INPUT_TIMEOUT_MS,
+        }
+    }
+}
+
+/// Arbitration between the three command sources described in the README's
+/// "控制源仲裁": `Manual` (sliders/presets/sequences), `External` (the
+/// task-4 UDP coefficient stream), and (added when the idle scheduler lands)
+/// `Idle`. Only Manual<->External is wired up here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ControlSource {
+    #[default]
+    Manual,
+    External,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalInputStatus {
+    pub port: u16,
+    pub active: bool,
+    pub last_seq: Option<u64>,
+    pub fps: f32,
+    pub timeout_ms: u64,
+    pub control_source: ControlSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +226,7 @@ pub struct RuntimeState {
     // derived per channel. Added in normalization phase 1 for the UI.
     pub target_norm: Vec<f32>,
     pub current_norm: Vec<f32>,
+    pub control_source: ControlSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +363,12 @@ struct InnerState {
     target_applied: Vec<f32>,
     current_applied: Vec<f32>,
     last_frame: Option<UdpControlFrame>,
+    control_source: ControlSource,
+    external_input_port: u16,
+    external_input_timeout: Duration,
+    external_last_seq: Option<u64>,
+    external_last_frame_at: Option<Instant>,
+    external_fps_ema: f32,
 }
 
 pub struct ControlService {
@@ -337,6 +401,8 @@ impl ControlService {
             .map(|channel| channel.neutral_applied)
             .collect();
 
+        let external_input_config = config.external_input.unwrap_or_default();
+
         let state = Arc::new(Mutex::new(InnerState {
             frame_seq: 0,
             channels,
@@ -347,9 +413,16 @@ impl ControlService {
             target_applied,
             current_applied,
             last_frame: None,
+            control_source: ControlSource::Manual,
+            external_input_port: external_input_config.port,
+            external_input_timeout: Duration::from_millis(external_input_config.timeout_ms),
+            external_last_seq: None,
+            external_last_frame_at: None,
+            external_fps_ema: 0.0,
         }));
 
         spawn_udp_heartbeat(Arc::clone(&state), Arc::clone(&logger), Arc::clone(&socket));
+        spawn_external_input_listener(Arc::clone(&state), external_input_config.port);
 
         Ok(Self {
             logger,
@@ -394,7 +467,8 @@ impl ControlService {
 
     pub async fn expression_presets(&self) -> Vec<ExpressionPresetSummary> {
         let state = self.state.lock().await;
-        state.expression_presets
+        state
+            .expression_presets
             .iter()
             .map(|preset| ExpressionPresetSummary {
                 id: preset.id.clone(),
@@ -405,6 +479,7 @@ impl ControlService {
 
     pub async fn set_motor_target(&self, update: MotorTargetUpdate) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         if update.motor_id >= MOTOR_COUNT {
             bail!("motor_id {} out of range", update.motor_id);
         }
@@ -419,6 +494,7 @@ impl ControlService {
         }
 
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         for (motor_id, logical) in logical_values.into_iter().enumerate() {
             apply_motor_target(&mut state, motor_id, logical);
         }
@@ -428,6 +504,7 @@ impl ControlService {
 
     pub async fn set_motor_target_norm(&self, motor_id: usize, norm: f32) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         if motor_id >= MOTOR_COUNT {
             bail!("motor_id {} out of range", motor_id);
         }
@@ -442,6 +519,7 @@ impl ControlService {
         }
 
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         for (motor_id, norm) in norm_values.into_iter().enumerate() {
             apply_motor_target_norm(&mut state, motor_id, norm);
         }
@@ -449,18 +527,20 @@ impl ControlService {
         Ok(build_runtime_state(&state))
     }
 
-    pub async fn center_all(&self) -> RuntimeState {
+    pub async fn center_all(&self) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         let channels = state.channels.clone();
         for (index, channel) in channels.iter().enumerate() {
             state.target_logical[index] = channel.neutral_logical;
             state.target_applied[index] = channel.neutral_applied;
         }
-        build_runtime_state(&state)
+        Ok(build_runtime_state(&state))
     }
 
     pub async fn apply_expression_preset(&self, preset_id: &str) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         let preset = state
             .expression_presets
             .iter()
@@ -488,6 +568,7 @@ impl ControlService {
         intensity: f32,
     ) -> Result<RuntimeState> {
         let mut state = self.state.lock().await;
+        ensure_manual_writable(&state)?;
         let preset = state
             .expression_presets
             .iter()
@@ -528,13 +609,18 @@ impl ControlService {
     pub async fn wink(&self) -> Result<RuntimeState> {
         self.apply_expression_preset(WINK_PRESET_ID).await?;
         tokio::time::sleep(WINK_HOLD).await;
-        Ok(self.center_all().await)
+        self.center_all().await
     }
 
     /// Nod the head: oscillate the neck mirror pair up/down for a couple of
     /// cycles, then return to neutral. Targets are set over time and the
     /// heartbeat interpolates + dispatches them.
     pub async fn nod(&self) -> Result<RuntimeState> {
+        {
+            let state = self.state.lock().await;
+            ensure_manual_writable(&state)?;
+        }
+
         // "Up" lifts motor 30 by increasing its angle; motor 31 mirrors it.
         let up = (NOD_AMPLITUDE_NORM, -NOD_AMPLITUDE_NORM);
         let down = (-NOD_AMPLITUDE_NORM, NOD_AMPLITUDE_NORM);
@@ -554,6 +640,28 @@ impl ControlService {
     pub async fn runtime_state(&self) -> RuntimeState {
         let state = self.state.lock().await;
         build_runtime_state(&state)
+    }
+
+    /// Immediately drop back to Manual regardless of whether the external
+    /// stream is still sending. If it keeps sending, its next accepted frame
+    /// re-claims External -- this is a point-in-time override for regaining
+    /// the UI, not a way to permanently block a misbehaving external source.
+    pub async fn force_manual_control(&self) -> RuntimeState {
+        let mut state = self.state.lock().await;
+        state.control_source = ControlSource::Manual;
+        build_runtime_state(&state)
+    }
+
+    pub async fn external_input_status(&self) -> ExternalInputStatus {
+        let state = self.state.lock().await;
+        ExternalInputStatus {
+            port: state.external_input_port,
+            active: state.control_source == ControlSource::External,
+            last_seq: state.external_last_seq,
+            fps: state.external_fps_ema,
+            timeout_ms: state.external_input_timeout.as_millis() as u64,
+            control_source: state.control_source,
+        }
     }
 
     pub async fn last_frame(&self) -> Option<UdpControlFrame> {
@@ -629,7 +737,7 @@ impl AppState {
         self.service.set_all_targets_norm(norm_values).await
     }
 
-    pub async fn center_all(&self) -> RuntimeState {
+    pub async fn center_all(&self) -> Result<RuntimeState> {
         self.service.center_all().await
     }
 
@@ -657,6 +765,14 @@ impl AppState {
 
     pub async fn runtime_state(&self) -> RuntimeState {
         self.service.runtime_state().await
+    }
+
+    pub async fn force_manual_control(&self) -> RuntimeState {
+        self.service.force_manual_control().await
+    }
+
+    pub async fn external_input_status(&self) -> ExternalInputStatus {
+        self.service.external_input_status().await
     }
 
     pub async fn last_frame(&self) -> Option<UdpControlFrame> {
@@ -769,6 +885,20 @@ fn normalize_expression_presets(
     Ok(expression_presets)
 }
 
+/// Manual command entry points (sliders/presets/nod/wink/center) call this
+/// first: while an external coefficient stream (task 4) is actively driving
+/// targets, manual writes are rejected rather than silently fighting it, so
+/// there is always exactly one source of truth for the target arrays. The
+/// frontend also greys out its controls, but this backend guard is the real
+/// enforcement per the architecture's "no process bypasses ControlService"
+/// rule extended to arbitration between command sources.
+fn ensure_manual_writable(state: &InnerState) -> Result<()> {
+    if state.control_source == ControlSource::External {
+        bail!("control source is External; call force_manual_control to regain manual control");
+    }
+    Ok(())
+}
+
 fn apply_motor_target(state: &mut InnerState, motor_id: usize, logical_value: f32) {
     let channel = state.channels[motor_id].clone();
     state.target_logical[motor_id] = channel.normalized_logical(logical_value);
@@ -853,6 +983,7 @@ fn build_runtime_state(state: &InnerState) -> RuntimeState {
         current_applied: state.current_applied.clone(),
         target_norm: normalized_view(&state.channels, &state.target_applied),
         current_norm: normalized_view(&state.channels, &state.current_applied),
+        control_source: state.control_source,
     }
 }
 
@@ -910,6 +1041,19 @@ fn spawn_udp_heartbeat(
             let maybe_frame = {
                 let mut state = state.lock().await;
                 let state = &mut *state;
+
+                if state.control_source == ControlSource::External {
+                    let timed_out = state
+                        .external_last_frame_at
+                        .is_none_or(|last| last.elapsed() > state.external_input_timeout);
+                    if timed_out {
+                        // Targets are left exactly where they are: falling
+                        // back to Manual must not snap the pose back.
+                        state.control_source = ControlSource::Manual;
+                        info!("external control source timed out, falling back to Manual");
+                    }
+                }
+
                 if let Some(endpoint) = state.endpoint {
                     for index in 0..MOTOR_COUNT {
                         let current = state.current_applied[index];
@@ -980,6 +1124,126 @@ fn spawn_udp_heartbeat(
             was_moving = moving;
         }
     });
+}
+
+/// Wire frame for the task-4 external coefficient input channel (distinct
+/// from the outgoing UdpControlFrame/WireFrame protocol to the Pi). A `null`
+/// entry in `coefficients` means "this channel is not driven by this frame,"
+/// e.g. a driver that only maps a subset of the 32 channels.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalInputFrame {
+    seq: u64,
+    coefficients: Vec<Option<f32>>,
+}
+
+/// Binds the external-input UDP socket and hands off received frames to
+/// `apply_external_frame`. Runs on a dedicated OS thread with a blocking
+/// recv + read timeout (frames arrive at low rate, e.g. 30Hz from
+/// tools/mediapipe_driver.py, so a tokio task isn't warranted) rather than
+/// sharing the 100Hz heartbeat's async loop.
+fn spawn_external_input_listener(state: Arc<Mutex<InnerState>>, port: u16) {
+    let socket = match UdpSocket::bind(("0.0.0.0", port)) {
+        Ok(socket) => socket,
+        Err(error) => {
+            warn!("failed to bind external input UDP socket on port {port}: {error}");
+            return;
+        }
+    };
+    if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(200))) {
+        warn!("failed to set external input socket read timeout: {error}");
+    }
+    info!("external coefficient input listening on 0.0.0.0:{port}");
+
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 65536];
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok((len, _addr)) => {
+                    let frame = match serde_json::from_slice::<ExternalInputFrame>(&buffer[..len]) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            warn!("skipping invalid external input frame: {error}");
+                            continue;
+                        }
+                    };
+                    tauri::async_runtime::block_on(apply_external_frame(&state, frame));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => warn!("external input socket recv error: {error}"),
+            }
+        }
+    });
+}
+
+async fn apply_external_frame(state: &Arc<Mutex<InnerState>>, frame: ExternalInputFrame) {
+    let mut state = state.lock().await;
+    apply_external_frame_locked(&mut state, frame);
+}
+
+/// Core logic behind `apply_external_frame`, split out so it is testable
+/// against a plain `&mut InnerState` without needing a tokio runtime (the
+/// caller already holds the lock).
+fn apply_external_frame_locked(state: &mut InnerState, frame: ExternalInputFrame) {
+    if frame.coefficients.len() != MOTOR_COUNT {
+        warn!(
+            "external input frame has {} coefficients, expected {}",
+            frame.coefficients.len(),
+            MOTOR_COUNT
+        );
+        return;
+    }
+
+    if let Some(last_seq) = state.external_last_seq {
+        if frame.seq <= last_seq {
+            // Out-of-order or duplicate: a newer frame already applied (or
+            // will apply) a more current target, so drop this one.
+            return;
+        }
+    }
+
+    let now = Instant::now();
+    if let Some(previous) = state.external_last_frame_at {
+        let delta = now.duration_since(previous).as_secs_f32();
+        if delta > 0.0 {
+            let instant_fps = 1.0 / delta;
+            state.external_fps_ema = if state.external_fps_ema <= 0.0 {
+                instant_fps
+            } else {
+                state.external_fps_ema * (1.0 - EXTERNAL_FPS_EMA_ALPHA)
+                    + instant_fps * EXTERNAL_FPS_EMA_ALPHA
+            };
+        }
+    }
+    state.external_last_seq = Some(frame.seq);
+    state.external_last_frame_at = Some(now);
+    state.control_source = ControlSource::External;
+
+    for (motor_id, maybe_coefficient) in frame.coefficients.into_iter().enumerate() {
+        let Some(coefficient) = maybe_coefficient else {
+            continue;
+        };
+        let channel = state.channels[motor_id].clone();
+        if !channel.enabled {
+            continue;
+        }
+        // Unlike presets' bipolar, neutral-anchored norm space, external
+        // input coefficients are a flat unipolar [0, 1] across the full
+        // applied range (0 -> minApplied, 1 -> maxApplied), per this
+        // channel's own wire format -- simple and matches typical ML
+        // driver outputs (e.g. MediaPipe blendshapes) directly.
+        let coefficient = coefficient.clamp(0.0, 1.0);
+        let applied =
+            channel.min_applied + coefficient * (channel.max_applied - channel.min_applied);
+        let logical = applied - channel.offset;
+        apply_motor_target_with_applied(state, motor_id, logical, applied);
+    }
+
+    maybe_apply_jaw_coupling_from_master(state);
 }
 
 #[cfg(test)]
@@ -1109,6 +1373,12 @@ mod tests {
             expression_presets: Vec::new(),
             endpoint: None,
             last_frame: None,
+            control_source: ControlSource::Manual,
+            external_input_port: DEFAULT_EXTERNAL_INPUT_PORT,
+            external_input_timeout: Duration::from_millis(DEFAULT_EXTERNAL_INPUT_TIMEOUT_MS),
+            external_last_seq: None,
+            external_last_frame_at: None,
+            external_fps_ema: 0.0,
         }
     }
 
@@ -1135,5 +1405,240 @@ mod tests {
         state.target_applied[26] = 97.5;
         apply_jaw_coupling(&mut state, &jaw_coupling);
         approx(state.target_applied[27], 97.5);
+    }
+
+    fn plain_state() -> InnerState {
+        let channels: Vec<MotorChannel> = (0..MOTOR_COUNT)
+            .map(|id| ch_with_id(id, 0.0, 1.0, 0.0))
+            .collect();
+        let target_applied: Vec<f32> = channels.iter().map(|c| c.neutral_applied).collect();
+        InnerState {
+            frame_seq: 0,
+            target_logical: channels.iter().map(|c| c.neutral_logical).collect(),
+            current_applied: target_applied.clone(),
+            target_applied,
+            channels,
+            jaw_coupling: None,
+            expression_presets: Vec::new(),
+            endpoint: None,
+            last_frame: None,
+            control_source: ControlSource::Manual,
+            external_input_port: DEFAULT_EXTERNAL_INPUT_PORT,
+            external_input_timeout: Duration::from_millis(DEFAULT_EXTERNAL_INPUT_TIMEOUT_MS),
+            external_last_seq: None,
+            external_last_frame_at: None,
+            external_fps_ema: 0.0,
+        }
+    }
+
+    fn null_coefficients() -> Vec<Option<f32>> {
+        vec![None; MOTOR_COUNT]
+    }
+
+    #[test]
+    fn external_frame_maps_coefficient_to_applied_range_and_claims_control_source() {
+        let mut state = plain_state();
+        state.channels[5] = ch_with_id(5, 20.0, 220.0, 120.0);
+        state.target_applied[5] = state.channels[5].neutral_applied;
+
+        let mut coefficients = null_coefficients();
+        coefficients[5] = Some(0.25);
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 1,
+                coefficients,
+            },
+        );
+
+        approx(state.target_applied[5], 20.0 + 0.25 * (220.0 - 20.0));
+        assert_eq!(state.control_source, ControlSource::External);
+        assert_eq!(state.external_last_seq, Some(1));
+    }
+
+    #[test]
+    fn external_frame_clamps_out_of_range_coefficients() {
+        let mut state = plain_state();
+        state.channels[3] = ch_with_id(3, 10.0, 50.0, 30.0);
+        state.target_applied[3] = state.channels[3].neutral_applied;
+
+        let mut over = null_coefficients();
+        over[3] = Some(5.0);
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 1,
+                coefficients: over,
+            },
+        );
+        approx(state.target_applied[3], 50.0);
+
+        let mut under = null_coefficients();
+        under[3] = Some(-5.0);
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 2,
+                coefficients: under,
+            },
+        );
+        approx(state.target_applied[3], 10.0);
+    }
+
+    #[test]
+    fn external_frame_ignores_disabled_and_null_channels() {
+        let mut state = plain_state();
+        state.channels[7] = MotorChannel {
+            enabled: false,
+            ..ch_with_id(7, 0.0, 180.0, 90.0)
+        };
+        let disabled_original = state.target_applied[7];
+        let untouched_original = state.target_applied[0];
+
+        let mut coefficients = null_coefficients();
+        coefficients[7] = Some(1.0); // disabled channel: must stay put despite a coefficient
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 1,
+                coefficients,
+            },
+        );
+        approx(state.target_applied[7], disabled_original);
+        approx(state.target_applied[0], untouched_original); // null: also untouched
+    }
+
+    #[test]
+    fn external_frame_drops_out_of_order_seq() {
+        let mut state = plain_state();
+        state.channels[2] = ch_with_id(2, 0.0, 100.0, 50.0);
+        state.target_applied[2] = 50.0;
+
+        let mut newer = null_coefficients();
+        newer[2] = Some(1.0);
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 5,
+                coefficients: newer,
+            },
+        );
+        approx(state.target_applied[2], 100.0);
+
+        let mut stale = null_coefficients();
+        stale[2] = Some(0.0);
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 3,
+                coefficients: stale,
+            },
+        );
+        approx(state.target_applied[2], 100.0);
+        assert_eq!(state.external_last_seq, Some(5));
+    }
+
+    #[test]
+    fn external_frame_rejects_wrong_length() {
+        let mut state = plain_state();
+        let original_source = state.control_source;
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 1,
+                coefficients: vec![Some(1.0); 5],
+            },
+        );
+        assert_eq!(state.control_source, original_source);
+        assert_eq!(state.external_last_seq, None);
+    }
+
+    #[test]
+    fn external_frame_triggers_jaw_coupling() {
+        let jaw_coupling = JawCouplingConfig {
+            master_motor_id: 26,
+            slave_ratios: BTreeMap::from([(27, -1.0)]),
+        };
+        let mut state = jaw_pair_state(jaw_coupling);
+
+        let mut coefficients = null_coefficients();
+        coefficients[26] = Some(0.0); // motor 26 range 60..135 -> min_applied (fully closed)
+        apply_external_frame_locked(
+            &mut state,
+            ExternalInputFrame {
+                seq: 1,
+                coefficients,
+            },
+        );
+
+        approx(state.target_applied[26], 60.0);
+        // 26 fully closed is norm -1 on its own scale; slave 27 (ratio -1.0)
+        // goes to its own +1, i.e. max_applied (120.0).
+        approx(state.target_applied[27], 120.0);
+    }
+
+    #[test]
+    fn ensure_manual_writable_blocks_only_when_external() {
+        let mut state = plain_state();
+        assert!(ensure_manual_writable(&state).is_ok());
+        state.control_source = ControlSource::External;
+        assert!(ensure_manual_writable(&state).is_err());
+    }
+
+    // End-to-end exercise of the real UDP listener thread and the heartbeat
+    // loop's timeout fallback (the unit tests above only cover the sync
+    // `apply_external_frame_locked` core, not spawn_external_input_listener
+    // or the tick-loop's timeout check). Talks to the actual configured
+    // external input port from src-tauri/config/motor_config.json, so it
+    // would conflict with a second concurrent instance bound to the same
+    // port -- acceptable here since it is the only test doing so.
+    #[tokio::test]
+    async fn external_input_listener_claims_and_times_out_control_source() {
+        let log_dir = std::env::temp_dir().join(format!(
+            "bionic_face_test_logs_{}_{}",
+            std::process::id(),
+            "external_input_listener_claims_and_times_out_control_source"
+        ));
+        let app_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = ControlService::new(log_dir, app_dir)
+            .await
+            .expect("failed to init ControlService against the real motor_config.json");
+
+        let status_before = service.external_input_status().await;
+        assert!(!status_before.active);
+
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sender socket");
+        let mut coefficients = vec![serde_json::Value::Null; MOTOR_COUNT];
+        coefficients[0] = serde_json::Value::from(1.0);
+        let frame = serde_json::json!({
+            "seq": 1,
+            "timestampNs": 0,
+            "coefficients": coefficients,
+        });
+        sender
+            .send_to(
+                serde_json::to_vec(&frame).unwrap().as_slice(),
+                ("127.0.0.1", status_before.port),
+            )
+            .expect("send external frame");
+
+        // Give the listener thread a moment to receive and apply the frame.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status_active = service.external_input_status().await;
+        assert!(
+            status_active.active,
+            "external frame should claim control_source"
+        );
+        assert_eq!(status_active.last_seq, Some(1));
+
+        // Without further frames, the heartbeat loop's timeout check (500ms
+        // default) should fall back to Manual on its own.
+        let wait = Duration::from_millis(status_active.timeout_ms) + Duration::from_millis(200);
+        tokio::time::sleep(wait).await;
+        let status_timed_out = service.external_input_status().await;
+        assert!(
+            !status_timed_out.active,
+            "should fall back to Manual after the timeout"
+        );
     }
 }

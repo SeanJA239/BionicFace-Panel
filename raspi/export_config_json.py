@@ -4,7 +4,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "raspi" / "config.py"
 OUTPUT_PATH = ROOT / "src-tauri" / "config" / "motor_config.json"
@@ -36,7 +35,9 @@ def build_channel(module, motor_id: int) -> dict:
     board, channel = motor_map[motor_id]
     min_applied, max_applied = limits.get(motor_id, (0, 180))
     offset = float(offsets.get(motor_id, 0))
-    neutral_applied = float(initial_applied.get(motor_id, (float(min_applied) + float(max_applied)) / 2.0))
+    neutral_applied = float(
+        initial_applied.get(motor_id, (float(min_applied) + float(max_applied)) / 2.0)
+    )
     neutral_applied = clamp(neutral_applied, float(min_applied), float(max_applied))
     neutral_logical = neutral_applied - offset
     enabled = motor_id not in disabled_motors
@@ -105,7 +106,9 @@ def load_expression_presets(path: Path) -> list[dict]:
             )
         clamped = [clamp(value, -1.0, 1.0) for value in norm]
         if clamped != norm:
-            print(f"WARNING: preset '{preset_id}' had out-of-range norm values, clamped to [-1, 1]")
+            print(
+                f"WARNING: preset '{preset_id}' had out-of-range norm values, clamped to [-1, 1]"
+            )
         presets.append({"id": preset_id, "label": label, "norm": clamped})
 
     return presets

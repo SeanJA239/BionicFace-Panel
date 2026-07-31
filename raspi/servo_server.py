@@ -9,10 +9,14 @@ import signal
 import socket
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from adafruit_servokit import ServoKit
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 LOGGER = logging.getLogger("udp-servo-executor")
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("config.py")
@@ -30,7 +34,7 @@ def load_module(path: Path):
     return module
 
 
-def build_kits(module) -> dict[int, "ServoKit"]:
+def build_kits(module) -> dict[int, ServoKit]:
     # Imported here, not at module scope, so --dry-run can run on any PC
     # without adafruit-servokit (and its Blinka/I2C backend) installed.
     from adafruit_servokit import ServoKit
@@ -130,7 +134,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config_path = Path(os.environ.get("BIONIC_FACE_CONFIG", DEFAULT_CONFIG_PATH)).resolve()
+    config_path = Path(
+        os.environ.get("BIONIC_FACE_CONFIG", DEFAULT_CONFIG_PATH)
+    ).resolve()
     module = load_module(config_path)
     motor_map = module.MOTOR_MAP
     udp_port = int(getattr(module, "UDP_PORT", DEFAULT_UDP_PORT))
@@ -162,7 +168,7 @@ def main() -> None:
     while not stop:
         try:
             packet, _addr = server.recvfrom(65535)
-        except socket.timeout:
+        except TimeoutError:
             continue
 
         packet = drain_to_latest(server, packet)

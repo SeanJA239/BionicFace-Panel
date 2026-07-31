@@ -89,12 +89,27 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     14: [("mouthUpperUpLeft", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # upper_lip_left
     15: [("mouthPucker", 0.7, 0.3)],  # upper_lip_mid
     16: [("mouthUpperUpRight", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # upper_lip_right
-    17: [("mouthSmileRight", 0.6, 0.4), ("mouthFrownRight", -0.6, 0.0)],  # mouth_right_corner_upper
-    18: [("mouthFrownRight", 0.5, 0.5), ("mouthSmileRight", -0.3, 0.0)],  # mouth_right_corner_lower
-    19: [("mouthSmileLeft", 0.6, 0.4), ("mouthFrownLeft", -0.6, 0.0)],  # mouth_left_corner_upper
-    20: [("mouthFrownLeft", 0.5, 0.5), ("mouthSmileLeft", -0.3, 0.0)],  # mouth_left_corner_lower
+    17: [
+        ("mouthSmileRight", 0.6, 0.4),
+        ("mouthFrownRight", -0.6, 0.0),
+    ],  # mouth_right_corner_upper
+    18: [
+        ("mouthFrownRight", 0.5, 0.5),
+        ("mouthSmileRight", -0.3, 0.0),
+    ],  # mouth_right_corner_lower
+    19: [
+        ("mouthSmileLeft", 0.6, 0.4),
+        ("mouthFrownLeft", -0.6, 0.0),
+    ],  # mouth_left_corner_upper
+    20: [
+        ("mouthFrownLeft", 0.5, 0.5),
+        ("mouthSmileLeft", -0.3, 0.0),
+    ],  # mouth_left_corner_lower
     21: [("mouthLowerDownLeft", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # lower_lip_left
-    22: [("mouthLowerDownRight", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # lower_lip_right
+    22: [
+        ("mouthLowerDownRight", 0.5, 0.4),
+        ("mouthPucker", 0.4, 0.0),
+    ],  # lower_lip_right
     23: [("mouthPucker", 0.7, 0.3)],  # lower_lip_mid_tendon
     # Jaw (24/25). jawOpen drives the primary jaw-open channel per the task
     # spec; 26/27 are intentionally absent -- control.rs's jaw coupling
@@ -132,7 +147,9 @@ class OneEuroFilter:
     cutoff; `d_cutoff` smooths the speed estimate itself.
     """
 
-    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.007, d_cutoff: float = 1.0) -> None:
+    def __init__(
+        self, min_cutoff: float = 1.0, beta: float = 0.007, d_cutoff: float = 1.0
+    ) -> None:
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.d_cutoff = d_cutoff
@@ -175,14 +192,18 @@ class FilterBank:
     d_cutoff: float
     filters: dict[int, OneEuroFilter] = field(default_factory=dict)
 
-    def apply(self, coefficients: list[float | None], timestamp: float) -> list[float | None]:
+    def apply(
+        self, coefficients: list[float | None], timestamp: float
+    ) -> list[float | None]:
         smoothed = list(coefficients)
         for channel_id in _MAPPED_CHANNEL_IDS:
             value = coefficients[channel_id]
             if value is None:
                 continue
             if channel_id not in self.filters:
-                self.filters[channel_id] = OneEuroFilter(self.min_cutoff, self.beta, self.d_cutoff)
+                self.filters[channel_id] = OneEuroFilter(
+                    self.min_cutoff, self.beta, self.d_cutoff
+                )
             smoothed[channel_id] = self.filters[channel_id].filter(value, timestamp)
         return smoothed
 
@@ -196,24 +217,55 @@ def build_frame(seq: int, coefficients: list[float | None]) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="MediaPipe -> BionicFace external coefficient driver")
-    parser.add_argument("--host", default=DEFAULT_HOST, help=f"External input host (default {DEFAULT_HOST})")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"External input port (default {DEFAULT_PORT})")
-    parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index (default 0)")
+    parser = argparse.ArgumentParser(
+        description="MediaPipe -> BionicFace external coefficient driver"
+    )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"External input host (default {DEFAULT_HOST})",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"External input port (default {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--camera", type=int, default=0, help="OpenCV camera index (default 0)"
+    )
     parser.add_argument(
         "--model",
         type=Path,
         default=Path(__file__).resolve().with_name("face_landmarker.task"),
         help="Path to the MediaPipe face_landmarker.task model file",
     )
-    parser.add_argument("--min-cutoff", type=float, default=1.0, help="One Euro Filter min_cutoff (default 1.0)")
-    parser.add_argument("--beta", type=float, default=0.007, help="One Euro Filter beta (default 0.007)")
-    parser.add_argument("--d-cutoff", type=float, default=1.0, help="One Euro Filter d_cutoff (default 1.0)")
-    parser.add_argument("--preview", action="store_true", help="Show a debug window (camera + landmarks + bars)")
+    parser.add_argument(
+        "--min-cutoff",
+        type=float,
+        default=1.0,
+        help="One Euro Filter min_cutoff (default 1.0)",
+    )
+    parser.add_argument(
+        "--beta", type=float, default=0.007, help="One Euro Filter beta (default 0.007)"
+    )
+    parser.add_argument(
+        "--d-cutoff",
+        type=float,
+        default=1.0,
+        help="One Euro Filter d_cutoff (default 1.0)",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show a debug window (camera + landmarks + bars)",
+    )
     return parser.parse_args()
 
 
-def draw_preview(surface, frame_bgr, landmarks, coefficients: list[float | None]) -> None:
+def draw_preview(
+    surface, frame_bgr, landmarks, coefficients: list[float | None]
+) -> None:
     """Renders the camera frame (mirrored to a pygame surface), landmark
     dots, and a bar chart of the mapped output coefficients. Imports pygame
     lazily so --preview is the only code path requiring a display.
@@ -239,7 +291,9 @@ def draw_preview(surface, frame_bgr, landmarks, coefficients: list[float | None]
         y = 10 + row * 14
         pygame.draw.rect(surface, (60, 60, 60), (bar_x0, y, bar_w, 10))
         if value is not None:
-            pygame.draw.rect(surface, (80, 200, 120), (bar_x0, y, int(bar_w * value), 10))
+            pygame.draw.rect(
+                surface, (80, 200, 120), (bar_x0, y, int(bar_w * value), 10)
+            )
         label = font.render(f"{channel_id:02d}", True, (220, 220, 220))
         surface.blit(label, (bar_x0 - 24, y))
 
@@ -281,7 +335,9 @@ def main() -> None:
         raise SystemExit(f"Could not open camera index {args.camera}")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    filter_bank = FilterBank(min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff)
+    filter_bank = FilterBank(
+        min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff
+    )
 
     preview_surface = None
     if args.preview:
@@ -290,7 +346,9 @@ def main() -> None:
         pygame.init()
         cam_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
         cam_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-        preview_surface = pygame.display.set_mode((cam_width + 220, max(cam_height, 32 * 14)))
+        preview_surface = pygame.display.set_mode(
+            (cam_width + 220, max(cam_height, 32 * 14))
+        )
         pygame.display.set_caption("mediapipe_driver preview")
 
     seq = 0
@@ -319,7 +377,10 @@ def main() -> None:
             scores: dict[str, float] = {}
             landmarks = None
             if result.face_blendshapes:
-                scores = {category.category_name: category.score for category in result.face_blendshapes[0]}
+                scores = {
+                    category.category_name: category.score
+                    for category in result.face_blendshapes[0]
+                }
             if result.face_landmarks:
                 landmarks = result.face_landmarks[0]
 

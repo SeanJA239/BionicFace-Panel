@@ -1,0 +1,14 @@
+[project]
+name = "bionic-face-panel-tools"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "mediapipe>=1.0.0",
+    "opencv-python>=5.0.0.93",
+    "pygame>=2.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.1",
+]

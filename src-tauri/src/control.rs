@@ -671,9 +671,16 @@ impl ControlService {
         let endpoint: SocketAddr = endpoint
             .parse()
             .with_context(|| format!("invalid UDP endpoint: {endpoint}"))?;
-        let mut state = self.state.lock().await;
-        state.endpoint = Some(endpoint);
+        {
+            let mut state = self.state.lock().await;
+            state.endpoint = Some(endpoint);
+        }
         info!("UDP executor connected to {}", endpoint);
+        // Safe-access handshake: push the already-settled current state out
+        // immediately rather than waiting for the next keepalive tick, so
+        // real hardware never sits on a stale pose after switching out of
+        // sim mode. This never changes any target, so there is no jump.
+        self.flush_current_frame().await?;
         Ok(TransportStatus {
             connected: true,
             endpoint: Some(endpoint.to_string()),
@@ -1823,7 +1830,7 @@ fn spawn_udp_heartbeat(
             tick = tick.wrapping_add(1);
 
             let mut moving = false;
-            let maybe_frame = {
+            let (endpoint, maybe_frame) = {
                 let mut state = state.lock().await;
                 let state = &mut *state;
 
@@ -1841,69 +1848,71 @@ fn spawn_udp_heartbeat(
 
                 advance_active_transition(state);
 
-                if let Some(endpoint) = state.endpoint {
-                    for index in 0..MOTOR_COUNT {
-                        let current = state.current_applied[index];
-                        let target = state.target_applied[index];
-                        if current != target {
-                            moving = true;
-                            state.current_applied[index] = step_towards(current, target);
-                        }
+                for index in 0..MOTOR_COUNT {
+                    let current = state.current_applied[index];
+                    let target = state.target_applied[index];
+                    if current != target {
+                        moving = true;
+                        state.current_applied[index] = step_towards(current, target);
                     }
+                }
 
-                    // Idle behavior only makes sense while something is
-                    // actually connected to show it; while disconnected,
-                    // last_moving_at is kept fresh so reconnecting doesn't
-                    // immediately count as "stationary for N seconds".
-                    update_idle_behavior(state, moving);
+                // Sim mode is a live digital twin, not a paused one: tick,
+                // interpolation, idle behavior, frame building, and the log
+                // below all run identically whether or not a real endpoint
+                // is connected. Only the wire send at the bottom of this
+                // loop is gated on `endpoint`.
+                update_idle_behavior(state, moving);
 
-                    if moving || tick % KEEPALIVE_TICK_DIVISOR == 0 {
-                        state.frame_seq += 1;
-                        let source = if moving {
-                            "udp-heartbeat"
-                        } else {
-                            "udp-keepalive"
-                        };
-                        match build_frame(
-                            state.frame_seq,
-                            source.to_string(),
-                            state.current_applied.clone(),
-                        ) {
-                            Ok(frame) => {
-                                state.last_frame = Some(frame.clone());
-                                Some((endpoint, frame))
-                            }
-                            Err(error) => {
-                                warn!("failed to build UDP frame: {error}");
-                                None
-                            }
-                        }
+                let maybe_frame = if moving || tick.is_multiple_of(KEEPALIVE_TICK_DIVISOR) {
+                    state.frame_seq += 1;
+                    let source = if moving {
+                        "udp-heartbeat"
                     } else {
-                        None
+                        "udp-keepalive"
+                    };
+                    match build_frame(
+                        state.frame_seq,
+                        source.to_string(),
+                        state.current_applied.clone(),
+                    ) {
+                        Ok(frame) => {
+                            state.last_frame = Some(frame.clone());
+                            Some(frame)
+                        }
+                        Err(error) => {
+                            warn!("failed to build UDP frame: {error}");
+                            None
+                        }
                     }
                 } else {
-                    state.last_moving_at = Instant::now();
                     None
-                }
+                };
+
+                (state.endpoint, maybe_frame)
             };
 
-            if let Some((endpoint, frame)) = maybe_frame {
-                match encode_wire(&frame) {
-                    Ok(payload) => {
-                        if let Err(error) = socket.send_to(&payload, endpoint) {
-                            warn!("failed to send UDP frame to {endpoint}: {error}");
-                        }
-                    }
-                    Err(error) => warn!("failed to encode UDP frame: {error}"),
-                }
-
+            if let Some(frame) = maybe_frame {
                 // Keepalive frames repeat unchanged angles, so only motion
-                // frames go to the log.
+                // frames go to the log -- true in both modes, so an
+                // idle-noise/preset/sequence run stays reviewable even
+                // without a Pi attached.
                 if moving {
                     if let Err(error) = logger.append(&frame).await {
                         warn!("failed to append UDP frame log: {error}");
                     }
                     log_dirty = true;
+                }
+
+                if let Some(endpoint) = endpoint {
+                    match encode_wire(&frame) {
+                        Ok(payload) => {
+                            if let Err(error) = socket.send_to(&payload, endpoint) {
+                                warn!("failed to send UDP frame to {endpoint}: {error}");
+                            }
+                        }
+                        Err(error) => warn!("failed to encode UDP frame: {error}"),
+                    }
                 }
             }
 

@@ -258,38 +258,39 @@ h2 {
 }
 
 .slider-row {
-  display: grid;
-  grid-template-columns: 1.3fr 1fr auto;
-  gap: 12px;
-  align-items: center;
-  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
   border-radius: 18px;
   background: rgba(15, 23, 42, 0.55);
   border: 1px solid rgba(148, 163, 184, 0.14);
-}
-
-.slider-row.dense {
-  grid-template-columns: minmax(220px, 1.1fr) 1fr auto;
 }
 
 .slider-row.disabled {
   opacity: 0.58;
 }
 
-.slider-meta {
+.slider-top {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
 }
 
-.slider-meta strong {
+.slider-top strong {
   color: #f8fafc;
   font-size: 0.92rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.slider-meta span {
-  color: #94a3b8;
-  font-size: 0.82rem;
+.value-inline {
+  color: #7dd3fc;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  flex: none;
 }
 
 .channel-badge {
@@ -301,22 +302,42 @@ h2 {
   border: 1px solid rgba(245, 158, 11, 0.25);
 }
 
-.value-pair {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: right;
-  color: #7dd3fc;
-  min-width: 70px;
-}
-
 .calibration-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 16px;
 }
 
-.face-preview-panel {
-  margin-bottom: 24px;
+.mode-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mode-badge {
+  width: fit-content;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+}
+
+.mode-badge.sim {
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.32);
+}
+
+.mode-badge.real {
+  background: rgba(74, 222, 128, 0.16);
+  color: #86efac;
+  border: 1px solid rgba(74, 222, 128, 0.32);
+}
+
+.side-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .face-preview {
@@ -347,20 +368,9 @@ h2 {
   line-height: 1.45;
 }
 
-.slider-row span {
-  color: #e2e8f0;
-  font-size: 0.95rem;
-}
-
 .slider-row input[type="range"] {
   width: 100%;
   accent-color: #38bdf8;
-}
-
-.slider-row strong {
-  min-width: 3ch;
-  text-align: right;
-  color: #7dd3fc;
 }
 
 @media (max-width: 1040px) {
@@ -385,10 +395,6 @@ h2 {
   .panel-header {
     flex-direction: column;
     align-items: start;
-  }
-
-  .slider-row {
-    grid-template-columns: 1fr;
   }
 
   .calibration-grid {

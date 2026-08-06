@@ -35,10 +35,11 @@ const MOTOR_COUNT = 32;
 // Slider drags fire change events far faster than the IPC round-trip is
 // worth; pending values are coalesced and sent at most ~30 times per second.
 const SEND_INTERVAL_MS = 33;
-// Polls runtime state (and thus control_source) so the panel notices an
-// external driver claiming control, or relinquishing it, without the user
-// having to trigger a manual action first.
-const RUNTIME_POLL_INTERVAL_MS = 300;
+// Polls runtime state (and thus control_source, and the face preview's
+// currentApplied) so the panel notices an external driver claiming control,
+// or relinquishing it, without the user having to trigger a manual action
+// first, and so the face preview reads as smooth motion rather than steps.
+const RUNTIME_POLL_INTERVAL_MS = 33;
 
 function fallbackRuntime(): RuntimeState {
   return {
@@ -85,21 +86,20 @@ const SliderRow = memo(function SliderRow({
 }: SliderRowProps) {
   const disabled = !channel.enabled || locked;
   return (
-    <label className={disabled ? "slider-row dense disabled" : "slider-row dense"}>
-      <div className="slider-meta">
+    <label
+      className={disabled ? "slider-row disabled" : "slider-row"}
+      title={`board ${channel.board} / ch ${channel.channel} / offset ${channel.offset.toFixed(1)}`}
+    >
+      <div className="slider-top">
         <strong>
           #{channel.id} {channel.name}
         </strong>
-        <span>
-          board {channel.board} / ch {channel.channel} / offset {channel.offset.toFixed(1)}
+        <span className="value-inline">
+          L {logicalValue.toFixed(1)} · A {appliedValue.toFixed(1)} · N {normValue.toFixed(2)}
         </span>
-        {!channel.enabled ? (
-          <span className="channel-badge">disabled in config</span>
-        ) : null}
-        {channel.enabled && locked ? (
-          <span className="channel-badge">external control active</span>
-        ) : null}
       </div>
+      {!channel.enabled ? <span className="channel-badge">disabled in config</span> : null}
+      {channel.enabled && locked ? <span className="channel-badge">external control active</span> : null}
       <input
         type="range"
         min={channel.minLogical}
@@ -109,11 +109,6 @@ const SliderRow = memo(function SliderRow({
         disabled={disabled}
         onChange={(event) => onChange(channel.id, Number(event.target.value))}
       />
-      <div className="value-pair">
-        <span>L {logicalValue.toFixed(1)}</span>
-        <span>A {appliedValue.toFixed(1)}</span>
-        <span>N {normValue.toFixed(2)}</span>
-      </div>
     </label>
   );
 });
@@ -374,14 +369,22 @@ function App() {
           </p>
         </div>
         <div className="hero-actions">
+          <div className="mode-indicator">
+            <span className={connected ? "mode-badge real" : "mode-badge sim"}>
+              {connected ? "实机模式" : "仿真模式"}
+            </span>
+            <span className="status-line muted">
+              {connected ? `已连接实机 (${runtime.endpoint ?? endpoint})` : "未连接实机 (仿真)"}
+            </span>
+          </div>
           <label className="endpoint-field">
             <span>UDP Endpoint</span>
             <input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} />
           </label>
           <div className="button-row">
-            <button onClick={handleConnect}>Connect</button>
+            <button onClick={handleConnect}>切到实机模式 (Connect)</button>
             <button className="secondary" onClick={handleDisconnect}>
-              Disconnect
+              切到仿真模式 (Disconnect)
             </button>
             <button className="secondary" onClick={handleCenterAll} disabled={isExternal}>
               Center All
@@ -453,7 +456,6 @@ function App() {
               ) : null}
             </>
           ) : null}
-          <p className="status-line">{connected ? "Transport: connected" : "Transport: idle"}</p>
           <p className="status-line">
             Control source: <strong>{controlSourceLabel(runtime.controlSource)}</strong>
             {isExternal && externalStatus
@@ -472,20 +474,6 @@ function App() {
           </label>
           <p className="status-line muted">{status}</p>
         </div>
-      </section>
-
-      <section className="panel face-preview-panel">
-        <div className="panel-header">
-          <div>
-            <p className="panel-kicker">Live Preview</p>
-            <h2>32-channel face render</h2>
-          </div>
-          <p className="panel-note">
-            Renders `currentApplied` directly (same math as tools/face_visualizer.py) -- no local
-            smoothing, tracks whatever the active control source is driving.
-          </p>
-        </div>
-        <FacePreview channels={channels} applied={runtime.currentApplied} />
       </section>
 
       <section className="workspace-grid single">
@@ -515,36 +503,53 @@ function App() {
           </div>
         </article>
 
-        <article className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-kicker">Runtime</p>
-              <h2>Transport and frame monitor</h2>
+        <div className="side-stack">
+          <article className="panel face-preview-panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-kicker">Live Preview</p>
+                <h2>32-channel face render</h2>
+              </div>
+              <p className="panel-note">
+                {connected
+                  ? "实机模式：指令层数字孪生，对照实物排查“指令对但脸不对”的问题。"
+                  : "仿真模式：没有真机时的主力无硬件预览。"}
+              </p>
             </div>
-            <button className="secondary" onClick={refreshLastFrame}>
-              Refresh Frame
-            </button>
-          </div>
+            <FacePreview channels={channels} applied={runtime.currentApplied} />
+          </article>
 
-          <div className="runtime-grid">
-            <div className="readout-chip">
-              <span>Heartbeat</span>
-              <strong>{runtime.heartbeatHz} Hz</strong>
+          <article className="panel">
+            <div className="panel-header">
+              <div>
+                <p className="panel-kicker">Runtime</p>
+                <h2>Transport and frame monitor</h2>
+              </div>
+              <button className="secondary" onClick={refreshLastFrame}>
+                Refresh Frame
+              </button>
             </div>
-            <div className="readout-chip">
-              <span>Disabled</span>
-              <strong>{runtime.disabledMotorIds.join(", ") || "None"}</strong>
-            </div>
-            <div className="readout-chip">
-              <span>Endpoint</span>
-              <strong>{runtime.endpoint ?? "Not set"}</strong>
-            </div>
-          </div>
 
-          <pre className="frame-dump">
-            {lastFrame ? JSON.stringify(lastFrame, null, 2) : "No frame captured yet."}
-          </pre>
-        </article>
+            <div className="runtime-grid">
+              <div className="readout-chip">
+                <span>Heartbeat</span>
+                <strong>{runtime.heartbeatHz} Hz</strong>
+              </div>
+              <div className="readout-chip">
+                <span>Disabled</span>
+                <strong>{runtime.disabledMotorIds.join(", ") || "None"}</strong>
+              </div>
+              <div className="readout-chip">
+                <span>Endpoint</span>
+                <strong>{runtime.endpoint ?? "Not set"}</strong>
+              </div>
+            </div>
+
+            <pre className="frame-dump">
+              {lastFrame ? JSON.stringify(lastFrame, null, 2) : "No frame captured yet."}
+            </pre>
+          </article>
+        </div>
       </section>
     </main>
   );

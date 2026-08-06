@@ -28,6 +28,7 @@ import {
   type SequenceSummary,
   type UdpControlFrame,
 } from "./tauri";
+import { FacePreview } from "./FacePreview";
 
 const DEFAULT_ENDPOINT = "192.168.1.101:6000";
 const MOTOR_COUNT = 32;
@@ -471,6 +472,20 @@ function App() {
           </label>
           <p className="status-line muted">{status}</p>
         </div>
+      </section>
+
+      <section className="panel face-preview-panel">
+        <div className="panel-header">
+          <div>
+            <p className="panel-kicker">Live Preview</p>
+            <h2>32-channel face render</h2>
+          </div>
+          <p className="panel-note">
+            Renders `currentApplied` directly (same math as tools/face_visualizer.py) -- no local
+            smoothing, tracks whatever the active control source is driving.
+          </p>
+        </div>
+        <FacePreview channels={channels} applied={runtime.currentApplied} />
       </section>
 
       <section className="workspace-grid single">

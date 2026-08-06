@@ -311,7 +311,21 @@ h2 {
 }
 
 .calibration-grid {
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+
+.face-preview-panel {
+  margin-bottom: 24px;
+}
+
+.face-preview {
+  display: block;
+  width: 100%;
+  max-height: 460px;
+  margin: 0 auto;
+  border-radius: 24px;
+  background: rgba(2, 6, 23, 0.6);
 }
 
 .runtime-grid {
@@ -374,6 +388,10 @@ h2 {
   }
 
   .slider-row {
+    grid-template-columns: 1fr;
+  }
+
+  .calibration-grid {
     grid-template-columns: 1fr;
   }
 }

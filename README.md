@@ -206,9 +206,13 @@ c' = c_rest + intensity * (c - c_rest)   // 按通道
 
 ### 依赖安装
 
+`tools/` 下这两个脚本（`mediapipe_driver.py`、`face_visualizer.py`）的依赖用 [uv](https://docs.astral.sh/uv/) 管理，声明在仓库根目录的 [pyproject.toml](pyproject.toml)/[uv.lock](uv.lock) 里（详见"依赖与包管理"一节）：
+
 ```bash
-python3 -m pip install mediapipe opencv-python pygame
+uv sync
 ```
+
+之后用 `uv run python3 tools/xxx.py` 而不是裸的 `python3 tools/xxx.py` 来跑，这样才会用到 `uv sync` 装好的虚拟环境。
 
 ### 模型文件下载
 
@@ -239,13 +243,13 @@ curl -L -o tools/face_landmarker.task \
 每个映射到的通道各自一个 `OneEuroFilter` 实例（约 40 行，`min_cutoff`/`beta`/`d_cutoff` 三个参数），命令行可调：
 
 ```bash
-python3 tools/mediapipe_driver.py --min-cutoff 1.0 --beta 0.007 --d-cutoff 1.0
+uv run python3 tools/mediapipe_driver.py --min-cutoff 1.0 --beta 0.007 --d-cutoff 1.0
 ```
 
 ### 调试预览
 
 ```bash
-python3 tools/mediapipe_driver.py --preview
+uv run python3 tools/mediapipe_driver.py --preview
 ```
 
 弹出窗口左侧是摄像头画面叠加 landmark 点，右侧是 32 通道里被映射到的那些的实时条形图，便于在没有硬件的情况下调映射权重和滤波参数。
@@ -254,13 +258,13 @@ python3 tools/mediapipe_driver.py --preview
 
 ```bash
 # 1. 可视化模拟器（替代树莓派）
-python3 tools/face_visualizer.py --port 6000
+uv run python3 tools/face_visualizer.py --port 6000
 
 # 2. 上位机面板，UDP Endpoint 填 127.0.0.1:6000
 npm run tauri dev
 
 # 3. 摄像头驱动（另开一个终端）
-python3 tools/mediapipe_driver.py --preview
+uv run python3 tools/mediapipe_driver.py --preview
 ```
 
 启动第 3 步后，控制源应自动切到 External、面板滑条置灰；对着摄像头做表情，可视化脸应实时跟随且没有高频抖动；关掉 `mediapipe_driver.py`（或它断流）后，约 500ms 内控制权应自动回落 Manual，脸保持最后姿态不跳变。
@@ -274,12 +278,37 @@ python3 tools/mediapipe_driver.py --preview
 - 通道仍保留在 32 通道协议里，不破坏数据结构和通道索引
 - 被禁用的通道在 UI 中锁定，并持续保持安全中位
 
+## 依赖与包管理
+
+三套技术栈各自的依赖锁定文件都提交进了仓库，保证"换台机器/别人拉下来能装出同一套版本"：
+
+| 锁文件 | 对应 | 装依赖 | 加/改依赖 |
+|---|---|---|---|
+| [package-lock.json](package-lock.json) | `package.json`（上位机前端，npm） | `npm ci`（首次拉取/CI 用，严格按锁文件装，不解析版本范围） | `npm install <pkg>`，会自动更新锁文件，两个文件一起提交 |
+| [src-tauri/Cargo.lock](src-tauri/Cargo.lock) | `src-tauri/Cargo.toml`（Rust） | `cargo build`（默认就用锁文件） | `cargo add <crate>` |
+| [uv.lock](uv.lock) | [pyproject.toml](pyproject.toml)（`tools/` 下 `mediapipe_driver.py`/`face_visualizer.py` 的 Python 依赖） | `uv sync` | `uv add <pkg>` |
+
+通用规则：
+
+- 不手改锁文件，也尽量不手改 `package.json`/`Cargo.toml`/`pyproject.toml` 里的版本号——统一用对应的包管理器命令（`npm install`/`cargo add`/`uv add`），版本号从当前 registry 数据来，不是凭记忆写死。
+- 首次拉取仓库、或者只是想装出和锁文件完全一致的版本时，前端用 `npm ci` 而不是 `npm install`——`npm install` 在 `package.json` 版本范围（`^`/`~`）允许的情况下可能装出比锁文件新的版本，`npm ci` 不会。
+- `node_modules/`、`.venv/`、`src-tauri/target/`、`dist/` 都是可重建产物，已经在 `.gitignore` 里，不需要也不应该提交。
+
+**清理脚本**（`package.json` 的 `scripts`，底层用 [rimraf](https://www.npmjs.com/package/rimraf) 做跨平台删除）：
+
+```bash
+npm run clean        # 删 dist/、.ruff_cache/，外加 cargo clean（Rust 编译产物）——构建缓存，不动已装的依赖
+npm run clean:deps   # 在 clean 基础上再删 node_modules/、.venv/ ——之后要重新 npm ci / uv sync 装依赖
+```
+
+两个脚本都不会碰 `logs/`（运行时产生的 UDP 帧记录，是数据不是缓存，参见"通信协议"一节的日志行为说明）。
+
 ## 工作流
 
 1. 修改 [raspi/config.py](raspi/config.py)（标定/联动/禁用）或 [presets.json](presets.json)（表情预设，32 个 `-1..1` 归一化系数）
 2. 运行 `python3 raspi/export_config_json.py`
 3. 树莓派上启动执行器：`python3 raspi/servo_server.py`
-4. 上位机启动面板：`npm run tauri dev`
+4. 上位机首次拉取仓库后装依赖：`npm ci`；启动面板：`npm run tauri dev`
 5. 在 UI 中连接 `<pi-ip>:6000`
 6. 开始单通道校准，或点击预设按钮批量核对表情
 

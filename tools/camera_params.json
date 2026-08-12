@@ -1,0 +1,16 @@
+{
+  "device": "/dev/video0",
+  "width": 640,
+  "height": 480,
+  "fps": 30.0,
+  "fourcc": "MJPG",
+  "controls": {
+    "auto_exposure": 1,
+    "exposure_time_absolute": null,
+    "exposure_dynamic_framerate": 0,
+    "white_balance_automatic": 0,
+    "white_balance_temperature": null,
+    "gain": null,
+    "power_line_frequency": 1
+  }
+}

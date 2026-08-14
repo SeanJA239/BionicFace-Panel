@@ -3,10 +3,63 @@
 目标：让 C100/C70 每次上电都输出**同一组成像参数**，使表情驱动链路（`tools/mediapipe_driver.py`）
 上游的图像统计量可复现。实现在 [`tools/camera_capture.py`](../../tools/camera_capture.py)。
 
-适用范围：Linux + `uvcvideo`（树莓派/PC 均可）。Windows 侧 DirectShow 的等价接口不在本文范围。
-本文所有控制项语义、编号、主从约束均引自 Linux 内核源码，出处逐条给在表里。
+适用范围：Linux + `uvcvideo`（树莓派 / Linux 上位机）。本文所有控制项语义、编号、主从约束均引自
+Linux 内核源码，出处逐条给在表里。
 
-## 0. 前置条件
+## 0. 运行环境：为什么必须是 Linux
+
+参数锁定这件事绑在 V4L2 上，不是偷懒。Windows 原生（DirectShow）能关掉自动曝光/白平衡/对焦，
+但拿不到同等强度的保证——查 OpenCV 5.x `cap_dshow.cpp` 可见：
+
+- 有范围查询能力却不外露：`IAMVideoProcAmp::GetRange` / `IAMCameraControl::GetRange` 只在后端内部
+  调用（`:1943`、`:1999`），Python API 无对应接口，拿不到 min/max/step/default/flags，
+  「越界即报错而不 clamp」失去依据。
+- 写入不做范围校验：`:1870`、`:1952` 两处注释原文
+  `// Perhaps add a check that lValue and Flags are within the range acquired from GetRange above`，
+  与 V4L2 后端那句「driver may clamp … ignored here」是同一类问题。
+- 回读语义不同：`CAP_PROP_AUTO_WB` 读回的是 `flags == CameraControl_Flags_Auto ? 1.0 : 0.0`
+  （`:3438-3440`），不是实际数值。
+- 无 master/slave 约束，写入顺序错了不会有任何提示。
+- 曝光标度与 V4L2 的 100 µs 单位不同（DirectShow 文档为 log₂ 秒），**参数组不可跨系统复用**。
+
+要在 Windows 上做到等强度，需用 `comtypes` 直接驱动 `IAMCameraControl` / `IAMVideoProcAmp`
+另写一层，规模与现有 V4L2 层相当。本项目不走这条路。
+
+### 开发期在 WSL2 上验证
+
+WSL2 默认内核**自带 UVC 支持**，无需重编内核，确认一下即可：
+
+```bash
+grep -E 'CONFIG_(VIDEO_DEV|USB_VIDEO_CLASS)=' /proc/config.gz  # 或 zcat
+ls /lib/modules/$(uname -r)/kernel/drivers/media/usb/uvc/uvcvideo.ko
+```
+
+把相机从 Windows 转发进来（[usbipd-win](https://github.com/dorssel/usbipd-win)）：
+
+```powershell
+winget install usbipd
+usbipd list                        # 找到相机的 BUSID
+usbipd bind --busid=<BUSID>        # 需管理员，持久生效
+usbipd attach --wsl --busid=<BUSID>  # 无需管理员，重启/重插后要重做
+```
+
+WSL 侧确认节点出现，必要时手动加载模块：
+
+```bash
+sudo modprobe uvcvideo
+ls /dev/video*
+```
+
+两个坑：
+
+1. **`attach` 不持久**。重启、重插、设备 reset 之后都要重新 attach，而每次重新 attach 相当于相机
+   重新上电——控制值回出厂默认，必须重跑 `lock`。这正是 §7「开机恢复」要解决的问题，在 WSL2 下会
+   更频繁地遇到。
+2. **WSL2 是独立网络命名空间**。`tools/mediapipe_driver.py` 默认往 `127.0.0.1:6100` 发包，在非镜像
+   网络模式下到不了 Windows 上的 ControlService，需要改用 Windows 主机 IP，或开启 WSL 镜像网络模式。
+   USB/IP 转发本身也会引入额外抖动，实测帧率请以最终部署机器为准，不要拿 WSL2 的数据验收。
+
+## 1. 前置条件
 
 1. C100 若未刷过 `docs/WHEELTEC C100 C70产品资料/.../4.C100暗处曝光闪白问题更新固件/` 的固件，
    暗处曝光行为本身不可复现（该目录即为「暗处曝光闪白」缺陷修复包，Windows 工具）。先刷固件，再锁参数。
@@ -19,7 +72,7 @@
    `Documentation/userspace-api/media/v4l/ext-ctrls-camera.rst`：「The exposure time is limited by
    the frame interval」），所以顺序固定为：设分辨率/fourcc/fps → 锁控制项。
 
-## 1. 为什么不用 OpenCV 的 `cap.set()`
+## 2. 为什么不用 OpenCV 的 `cap.set()`
 
 OpenCV 的 V4L2 后端会把 `CAP_PROP_*` 映射到 V4L2 CID（`modules/videoio/src/cap_v4l.cpp`
 `capPropertyToV4L2()`，如 `CAP_PROP_AUTO_EXPOSURE → V4L2_CID_EXPOSURE_AUTO`、
@@ -35,11 +88,11 @@ OpenCV 的 V4L2 后端会把 `CAP_PROP_*` 映射到 V4L2 CID（`modules/videoio/
 3. 没有 `min/max/step/default/flags` 查询接口，无法判定某控制项是否存在、是否处于 INACTIVE。
 
 因此本仓库的做法：**取流用 OpenCV，控制项用 V4L2 ioctl 直接读写，并逐项回读校验**。控制项通过
-**数值 CID** 寻址（CID 是稳定 ABI），不依赖控制项名字（名字随内核版本变过，见 §2 注）。
+**数值 CID** 寻址（CID 是稳定 ABI），不依赖控制项名字（名字随内核版本变过，见 §3 注）。
 厂商官方示例 `cam_usb_set/set.cpp` 也是同一路线：单独 `open("/dev/video0", O_RDWR)` 后用
 `VIDIOC_QUERYCTRL` / `VIDIOC_S_CTRL`，与 OpenCV 取流互不干扰。
 
-## 2. 控制项清单
+## 3. 控制项清单
 
 CID 数值由 `include/uapi/linux/v4l2-controls.h` 推出（`V4L2_CID_BASE = 0x00980900`，
 `V4L2_CID_CAMERA_CLASS_BASE = 0x009A0900`）。「v4l2-ctl 名」是 `v4l2-ctl` 对驱动上报名字做
@@ -53,8 +106,8 @@ CID 数值由 `include/uapi/linux/v4l2-controls.h` 推出（`V4L2_CID_BASE = 0x0
 | `exposure_dynamic_framerate` | `exposure_dynamic_framerate` | `V4L2_CID_EXPOSURE_AUTO_PRIORITY` | `0x009A0903` | bool | **0** | 0 = 不允许驱动/相机动态改帧率。仅在 AE 处于 Auto/Aperture Priority 时生效，但为防回退到自动仍显式写 0 |
 | `white_balance_automatic` | `white_balance_automatic` | `V4L2_CID_AUTO_WHITE_BALANCE` | `0x0098090C` | bool | **0** | AWB 开关 |
 | `white_balance_temperature` | `white_balance_temperature` | `V4L2_CID_WHITE_BALANCE_TEMPERATURE` | `0x0098091A` | int | 实测值 | 色温（K）。从属于 `white_balance_automatic` |
-| `gain` | `gain` | `V4L2_CID_GAIN` | `0x00980913` | int | 实测值 | 见 §3「增益的坑」 |
-| `focus_automatic_continuous` | `focus_automatic_continuous` | `V4L2_CID_FOCUS_AUTO` | `0x009A090C` | bool | **0** | 连续自动对焦开关；这两款很可能不存在此控制项，见 §4 |
+| `gain` | `gain` | `V4L2_CID_GAIN` | `0x00980913` | int | 实测值 | 见 §4「增益的坑」 |
+| `focus_automatic_continuous` | `focus_automatic_continuous` | `V4L2_CID_FOCUS_AUTO` | `0x009A090C` | bool | **0** | 连续自动对焦开关；这两款很可能不存在此控制项，见 §5 |
 | `focus_absolute` | `focus_absolute` | `V4L2_CID_FOCUS_ABSOLUTE` | `0x009A090A` | int | 实测值 | 从属于 `focus_automatic_continuous` |
 | `power_line_frequency` | `power_line_frequency` | `V4L2_CID_POWER_LINE_FREQUENCY` | `0x00980918` | menu | **1** | 0=Disabled, 1=50Hz, 2=60Hz, 3=Auto。国内市电取 1，抑制条纹；`Auto` 会引入自适应行为 |
 | `backlight_compensation` | `backlight_compensation` | `V4L2_CID_BACKLIGHT_COMPENSATION` | `0x0098091C` | int | 实测值 | 规格书标称「背光补偿：自动」，若存在此项应显式定死 |
@@ -76,7 +129,7 @@ Saturation 80 / Sharpness 0 / Gamma 40`。注意同一资料包里 `set.cpp` 把
 `100~500` 而默认值写 `40`（自相矛盾），且它对越界值做静默 clamp。**这些数只能当起点，实际范围一律以
 `VIDIOC_QUERYCTRL` 回报的 min/max/step 为准**——本仓库的实现对越界值直接报错而不 clamp。
 
-## 3. 写入顺序：必须先关自动，再写数值
+## 4. 写入顺序：必须先关自动，再写数值
 
 `drivers/media/usb/uvc/uvc_ctrl.c` 的映射表里，三对控制项是 master/slave 关系：
 
@@ -108,7 +161,7 @@ UVC **没有独立的 AGC 开关**：AGC 归自动曝光管，`auto_exposure=1` 
 用软件定值，只能：固定照明 → 预热 → 关 AE → `dump` 记录当次的实际值 → 每次开机用 `verify` 确认，
 差异超阈值就报警。这一限制要写进验收标准，不要假装锁住了。
 
-## 4. 对焦
+## 5. 对焦
 
 `docs/camera/CAPABILITIES.md` 里对焦形式和最近对焦距离都是 `UNKNOWN`：C100/C70 的资料全篇没有出现
 自动对焦、对焦行程、MOD 等任何字样，规格书只写「2.1mm/2.8mm 标准镜头，可以带 IRCUT」。这类模组通常
@@ -120,10 +173,10 @@ v4l2-ctl -d /dev/video0 -l | grep -i focus
 
 - **没有输出** → 相机不暴露对焦控制项，软件层无需（也无法）锁定。此时「固定对焦」是机械问题：
   调焦到位后在镜筒螺纹上点厌氧胶/UV 胶锁死，并在装配文档里记录。本仓库配置里把
-  `focus_automatic_continuous` / `focus_absolute` 留空即可（`null`，见 §5）。
-- **有输出** → 按 §2/§3 一起锁：先 `focus_automatic_continuous=0`，再 `focus_absolute=<实测值>`。
+  `focus_automatic_continuous` / `focus_absolute` 留空即可（`null`，见 §6）。
+- **有输出** → 按 §3/§4 一起锁：先 `focus_automatic_continuous=0`，再 `focus_absolute=<实测值>`。
 
-## 5. 参数组文件与命令
+## 6. 参数组文件与命令
 
 参数组是一个 JSON 文件（默认 `tools/camera_params.json`），`controls` 里 `null` 表示
 **该项尚未在真机上定标**，`lock` 时会直接报错而不是拿默认值凑——不产生编造的数值。
@@ -173,14 +226,14 @@ v4l2-ctl -d /dev/video0 --set-ctrl=exposure_time_absolute=<值>,gain=<值>,white
 v4l2-ctl -d /dev/video0 --get-ctrl=auto_exposure,exposure_time_absolute,gain,white_balance_temperature
 ```
 
-## 6. 开机恢复同一组参数
+## 7. 开机恢复同一组参数
 
 控制值保存在**相机内部**，掉电或重新插拔即回到固件默认（自动曝光/自动白平衡）。同一次上电内多次
 open/close 一般保持不变，但不作为保证。因此每次上电都要重放参数组，并且**回读校验**。
 
 ### 方案 A（首选）：取流进程自己锁
 
-应用进程打开相机后立刻锁参数，顺序与 §0.3 一致，一步到位，不依赖系统服务：
+应用进程打开相机后立刻锁参数，顺序与 §1.3 一致，一步到位，不依赖系统服务：
 
 ```python
 from pathlib import Path
@@ -257,12 +310,12 @@ python tools/camera_capture.py verify --config tools/camera_params.json
 python tools/camera_capture.py selftest --config tools/camera_params.json
 ```
 
-## 7. 验收标准
+## 8. 验收标准
 
 1. `verify` 在冷启动后输出零差异。
 2. `selftest` 连拍 100 帧的实际帧率与协商 fps 偏差在可接受范围内，且**遮挡镜头/开关房间灯时帧率不变**
    （证明 `exposure_dynamic_framerate=0` 生效、AE 未回退）。
 3. 遮挡镜头 2 秒再放开，画面亮度不做「呼吸」式自适应（证明 AE/AWB 已关）。
-4. 若该机型不暴露 `gain`（见 §3），必须在验收记录里写明「增益为冻结值而非定值」，并附
+4. 若该机型不暴露 `gain`（见 §4），必须在验收记录里写明「增益为冻结值而非定值」，并附
    `verify` 的实际读数作为基线。
-5. C100 已刷 `4.` 目录固件（见 §0.1），否则暗处曝光不可复现，前四条在暗场下不成立。
+5. C100 已刷 `4.` 目录固件（见 §1.1），否则暗处曝光不可复现，前四条在暗场下不成立。

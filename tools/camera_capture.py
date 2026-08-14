@@ -296,7 +296,7 @@ class V4L2Device:
             hint = ""
             if exc.errno == errno.EACCES:
                 hint = (
-                    " (its master control is still automatic -- see PARAM_LOCK.md §3)"
+                    " (its master control is still automatic -- see PARAM_LOCK.md §4)"
                 )
             raise CameraError(
                 f"VIDIOC_S_CTRL {name}={value}: {exc.strerror}{hint}"
@@ -687,7 +687,7 @@ def cmd_dump(args: argparse.Namespace) -> int:
     config.controls = controls
     config.save(args.config)
     print(f"wrote {len(controls)} current control values to {args.config}")
-    print("review the auto_* switches before locking (docs/camera/PARAM_LOCK.md §5)")
+    print("review the auto_* switches before locking (docs/camera/PARAM_LOCK.md §6)")
     return 0
 
 

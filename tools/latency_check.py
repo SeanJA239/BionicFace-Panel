@@ -31,6 +31,10 @@ import numpy as np
 from camera_capture import Camera, CameraError, CaptureConfig
 from facemesh import DEFAULT_MODEL, LandmarkExtractor
 
+# Below this share of frames the run says nothing about timing, only about framing.
+UNUSABLE_DETECTION_RATE = 0.5
+GOOD_DETECTION_RATE = 0.9
+
 
 @dataclass(frozen=True)
 class StageTimings:
@@ -124,11 +128,16 @@ def report(
     )
     print(f"face detected in {detections}/{frames} frames ({rate * 100:.1f}%)")
 
+    # Compare *inference* against the frame budget, not end-to-end. grab()
+    # blocks until the next frame is ready, so end-to-end is frame_interval +
+    # inference by construction and would trip the check on any healthy setup.
+    # What decides whether processing keeps up is inference alone.
     budget_ms = 1000.0 / requested_fps if requested_fps > 0 else float("inf")
-    if stages[-1].p95 > budget_ms:
+    inference = next(stage for stage in stages if stage.name == "inference")
+    if inference.p95 > budget_ms:
         print(
-            f"\nwarning: end-to-end p95 {stages[-1].p95:.2f}ms exceeds the "
-            f"{budget_ms:.2f}ms budget for {requested_fps:g} fps -- inference cannot "
+            f"\nwarning: inference p95 {inference.p95:.2f}ms exceeds the "
+            f"{budget_ms:.2f}ms budget for {requested_fps:g} fps -- processing cannot "
             f"keep up with the stream, frames will queue or drop"
         )
     if detections == 0:
@@ -138,6 +147,19 @@ def report(
             file=sys.stderr,
         )
         return 1
+    if rate < UNUSABLE_DETECTION_RATE:
+        print(
+            f"\ndetection rate {rate * 100:.1f}% is too low to measure anything on: "
+            f"the face is probably small, clipped by the frame edge or badly lit. "
+            f"Fix framing (board 2 step 3) before recording a noise floor.",
+            file=sys.stderr,
+        )
+        return 1
+    if rate < GOOD_DETECTION_RATE:
+        print(
+            f"\nwarning: detection rate {rate * 100:.1f}% -- usable but not solid; "
+            f"expect near-100% once the face fills 60-80% of the frame"
+        )
     return 0
 
 

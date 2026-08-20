@@ -112,6 +112,7 @@ CONTROLS: dict[str, int] = {
     "brightness": _USER_BASE + 0,
     "contrast": _USER_BASE + 1,
     "saturation": _USER_BASE + 2,
+    "hue": _USER_BASE + 3,
     "white_balance_automatic": _USER_BASE + 12,
     "gamma": _USER_BASE + 16,
     "gain": _USER_BASE + 19,
@@ -124,6 +125,12 @@ CONTROLS: dict[str, int] = {
     "exposure_dynamic_framerate": _CAMERA_BASE + 3,
     "focus_absolute": _CAMERA_BASE + 10,
     "focus_automatic_continuous": _CAMERA_BASE + 12,
+    # Digital pan/tilt/zoom. These crop and re-frame the sensor output, so a
+    # drifting zoom changes landmark geometry as surely as moving the camera
+    # would -- they belong in the locked set on any device that exposes them.
+    "pan_absolute": _CAMERA_BASE + 8,
+    "tilt_absolute": _CAMERA_BASE + 9,
+    "zoom_absolute": _CAMERA_BASE + 13,
 }
 
 _CID_TO_NAME = {cid: name for name, cid in CONTROLS.items()}

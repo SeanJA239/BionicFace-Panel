@@ -46,3 +46,9 @@ error.txt
 
 # Local Python cache on macOS
 .Python
+
+# Docs
+WHEELTEC C100 C70产品资料/
+
+# MediaPipe model asset (README documents the download command)
+tools/*.task

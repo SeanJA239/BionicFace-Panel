@@ -5,12 +5,24 @@
   "fps": 30.0,
   "fourcc": "MJPG",
   "controls": {
-    "auto_exposure": 1,
-    "exposure_time_absolute": null,
-    "exposure_dynamic_framerate": 0,
+    "brightness": 0,
+    "contrast": 140,
+    "saturation": 138,
+    "hue": 0,
     "white_balance_automatic": 0,
-    "white_balance_temperature": null,
-    "gain": null,
-    "power_line_frequency": 1
+    "gamma": 35,
+    "gain": 0,
+    "power_line_frequency": 1,
+    "white_balance_temperature": 2500,
+    "sharpness": 5,
+    "backlight_compensation": 0,
+    "auto_exposure": 1,
+    "exposure_time_absolute": 300,
+    "exposure_dynamic_framerate": 0,
+    "focus_absolute": 4096,
+    "focus_automatic_continuous": 0,
+    "pan_absolute": 0,
+    "tilt_absolute": 0,
+    "zoom_absolute": 2
   }
 }

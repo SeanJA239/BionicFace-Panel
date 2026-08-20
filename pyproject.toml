@@ -12,3 +12,9 @@ dependencies = [
 dev = [
     "ruff>=0.16.1",
 ]
+
+[tool.ruff.lint.isort]
+# tools/ is a script directory, not an installed package, so these are imported
+# by bare module name (sys.path[0] is tools/ when run as `python tools/x.py`).
+# Tell isort they are ours so they stay in their own import block.
+known-first-party = ["camera_capture", "facemesh"]

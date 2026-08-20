@@ -50,14 +50,28 @@ sudo modprobe uvcvideo
 ls /dev/video*
 ```
 
-两个坑：
+四个坑：
 
-1. **`attach` 不持久**。重启、重插、设备 reset 之后都要重新 attach，而每次重新 attach 相当于相机
+1. **节点权限**。WSL 没有 logind seat，`/dev/video*` 是 `root:video 0660`，普通用户开不了，
+   且每次 re-attach 都会重建节点、把手工 `chmod` 冲掉。udevd 在 WSL(systemd) 下是跑着的，所以
+   一条规则可一次性解决（VID/PID 用实测值）：
+
+   ```bash
+   sudo tee /etc/udev/rules.d/70-wheeltec-camera.rules >/dev/null <<'EOF'
+   SUBSYSTEM=="video4linux", ATTRS{idVendor}=="2ce3", ATTRS{idProduct}=="c670", MODE="0666"
+   EOF
+   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=video4linux
+   ```
+
+2. **`attach` 不持久**。重启、重插、设备 reset 之后都要重新 attach，而每次重新 attach 相当于相机
    重新上电——控制值回出厂默认，必须重跑 `lock`。这正是 §7「开机恢复」要解决的问题，在 WSL2 下会
    更频繁地遇到。
-2. **WSL2 是独立网络命名空间**。`tools/mediapipe_driver.py` 默认往 `127.0.0.1:6100` 发包，在非镜像
-   网络模式下到不了 Windows 上的 ControlService，需要改用 Windows 主机 IP，或开启 WSL 镜像网络模式。
-   USB/IP 转发本身也会引入额外抖动，实测帧率请以最终部署机器为准，不要拿 WSL2 的数据验收。
+3. **网络命名空间**。若 WSL 处于默认（NAT）模式，`tools/mediapipe_driver.py` 往 `127.0.0.1:6100`
+   发的包到不了 Windows 上的 ControlService，需要改用主机 IP。**镜像（mirrored）模式下共享
+   localhost，没有这个问题** —— `usbipd attach` 会打印当前模式，先看一眼再决定。
+4. **USB/IP 会掉线**。实测出现过一次流到第 29 帧断开（`urb->status -104`、`vhci_hcd: connection
+   closed`），重新 attach 后同配置连续 35 秒无恙，属偶发。等时视频流套在 TCP 上是 USB/IP 的固有
+   弱点，长时间录制（如噪声底）建议在真 Linux 机器上做。抖动也会偏大，实测帧率以最终部署机器为准。
 
 ## 1. 前置条件
 
@@ -106,8 +120,12 @@ CID 数值由 `include/uapi/linux/v4l2-controls.h` 推出（`V4L2_CID_BASE = 0x0
 | `exposure_dynamic_framerate` | `exposure_dynamic_framerate` | `V4L2_CID_EXPOSURE_AUTO_PRIORITY` | `0x009A0903` | bool | **0** | 0 = 不允许驱动/相机动态改帧率。仅在 AE 处于 Auto/Aperture Priority 时生效，但为防回退到自动仍显式写 0 |
 | `white_balance_automatic` | `white_balance_automatic` | `V4L2_CID_AUTO_WHITE_BALANCE` | `0x0098090C` | bool | **0** | AWB 开关 |
 | `white_balance_temperature` | `white_balance_temperature` | `V4L2_CID_WHITE_BALANCE_TEMPERATURE` | `0x0098091A` | int | 实测值 | 色温（K）。从属于 `white_balance_automatic` |
-| `gain` | `gain` | `V4L2_CID_GAIN` | `0x00980913` | int | 实测值 | 见 §4「增益的坑」 |
-| `focus_automatic_continuous` | `focus_automatic_continuous` | `V4L2_CID_FOCUS_AUTO` | `0x009A090C` | bool | **0** | 连续自动对焦开关；这两款很可能不存在此控制项，见 §5 |
+| `gain` | `gain` | `V4L2_CID_GAIN` | `0x00980913` | int | 实测值 | 见 §4「增益的坑」。C100 实测暴露此项（0..63），故该坑不成立 |
+| `hue` | `hue` | `V4L2_CID_HUE` | `0x00980903` | int | 实测值 | C100 实测存在（−180..180） |
+| `pan_absolute` | `pan_absolute` | `V4L2_CID_PAN_ABSOLUTE` | `0x009A0908` | int | 实测值 | 数字平移。**会重构图，等效于机位移动，必须锁** |
+| `tilt_absolute` | `tilt_absolute` | `V4L2_CID_TILT_ABSOLUTE` | `0x009A0909` | int | 实测值 | 同上 |
+| `zoom_absolute` | `zoom_absolute` | `V4L2_CID_ZOOM_ABSOLUTE` | `0x009A090D` | int | 实测值 | 数字变焦。同上 |
+| `focus_automatic_continuous` | `focus_automatic_continuous` | `V4L2_CID_FOCUS_AUTO` | `0x009A090C` | bool | **0** | 连续自动对焦开关。C100 实测存在且出厂开启，但对焦本身无效，见 §5 |
 | `focus_absolute` | `focus_absolute` | `V4L2_CID_FOCUS_ABSOLUTE` | `0x009A090A` | int | 实测值 | 从属于 `focus_automatic_continuous` |
 | `power_line_frequency` | `power_line_frequency` | `V4L2_CID_POWER_LINE_FREQUENCY` | `0x00980918` | menu | **1** | 0=Disabled, 1=50Hz, 2=60Hz, 3=Auto。国内市电取 1，抑制条纹；`Auto` 会引入自适应行为 |
 | `backlight_compensation` | `backlight_compensation` | `V4L2_CID_BACKLIGHT_COMPENSATION` | `0x0098091C` | int | 实测值 | 规格书标称「背光补偿：自动」，若存在此项应显式定死 |
@@ -153,6 +171,13 @@ Saturation 80 / Sharpness 0 / Gamma 40`。注意同一资料包里 `set.cpp` 把
 （存在则写）→ `exposure_dynamic_framerate=0` → 其余数值项任意序。
 `tools/camera_capture.py` 把前四项固定排在最前（`_APPLY_FIRST`）。
 
+### 帧率会被曝光时间悄悄拖下去
+
+`exposure_dynamic_framerate=0` 的语义是「帧率必须恒定」，但 **C100 实测不遵守**：帧率随曝光
+线性下降（fps ≈ 1/曝光），而 `cap.get(CAP_PROP_FPS)` 始终报 30。所以真正的约束是
+**曝光时间 ≤ 帧间隔**（30 fps → `exposure_time_absolute` ≤ 300），并且只能靠实测发现。
+详细数据见 `CAPABILITIES.md` 的「真机实测」。写 0 仍然要写，但不能依赖它。
+
 ### 增益的坑
 
 UVC **没有独立的 AGC 开关**：AGC 归自动曝光管，`auto_exposure=1` 之后增益就不再自动变化。
@@ -163,18 +188,27 @@ UVC **没有独立的 AGC 开关**：AGC 归自动曝光管，`auto_exposure=1` 
 
 ## 5. 对焦
 
-`docs/camera/CAPABILITIES.md` 里对焦形式和最近对焦距离都是 `UNKNOWN`：C100/C70 的资料全篇没有出现
-自动对焦、对焦行程、MOD 等任何字样，规格书只写「2.1mm/2.8mm 标准镜头，可以带 IRCUT」。这类模组通常
-是螺纹手动调焦的定焦镜头，但资料不能自证。判定方法：
+资料全篇没有出现自动对焦、对焦行程、MOD 等任何字样，规格书只写「2.1mm/2.8mm 标准镜头，可以带
+IRCUT」。**C100 实测结果是：控制项存在，但不起作用。**
+
+`focus_automatic_continuous`（出厂 =1）和 `focus_absolute`（2048..8192，默认 4096）都在，可写可
+回读。但把 `focus_absolute` 扫过全行程，画面清晰度（拉普拉斯方差）是 99.0 / 97.0 / 85.2 / 90.5 —— 
+无单调趋势，波动量级与场景噪声相当。真实的可调焦镜头会出现明显峰值和数倍衰减。所以这是定焦镜头
+配了一套摆设控制项，常见于这类廉价模组。（存疑一点：测试场景可能整体落在景深内，若要更严格，
+应在近距离放置细节标靶重测。）
+
+处理方式：
+
+- **照旧写 `focus_automatic_continuous=0` 和一个固定的 `focus_absolute`**。它们不改变画面，但让
+  参数组完整、`verify` 有确定的比对基准，成本为零。
+- **真正的「固定对焦」是机械问题**：调焦到位后在镜筒螺纹上点厌氧胶/UV 胶锁死，并在装配文档里记录。
+- 换机型时重跑一遍上面的清晰度扫描再下结论，别照搬 C100 的判定。
+
+判定命令（本仓库工具直接给出全部控制项及其范围）：
 
 ```bash
-v4l2-ctl -d /dev/video0 -l | grep -i focus
+python tools/camera_capture.py list --device /dev/video0 | grep -i focus
 ```
-
-- **没有输出** → 相机不暴露对焦控制项，软件层无需（也无法）锁定。此时「固定对焦」是机械问题：
-  调焦到位后在镜筒螺纹上点厌氧胶/UV 胶锁死，并在装配文档里记录。本仓库配置里把
-  `focus_automatic_continuous` / `focus_absolute` 留空即可（`null`，见 §6）。
-- **有输出** → 按 §3/§4 一起锁：先 `focus_automatic_continuous=0`，再 `focus_absolute=<实测值>`。
 
 ## 6. 参数组文件与命令
 
@@ -262,11 +296,11 @@ lsusb                          # 找到相机那一行
 udevadm info -a /dev/video0 | grep -E 'idVendor|idProduct' | head -4
 ```
 
-`/etc/udev/rules.d/80-bionicface-camera.rules`（把 `1234`/`5678` 换成实测值）：
+`/etc/udev/rules.d/80-bionicface-camera.rules`（VID/PID 为 C100 实测值 `2ce3:c670`）：
 
 ```
 # 只匹配 capture 节点（index==0），跳过 metadata 节点；给出稳定符号链接并拉起锁参服务
-SUBSYSTEM=="video4linux", ATTRS{idVendor}=="1234", ATTRS{idProduct}=="5678", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="2ce3", ATTRS{idProduct}=="c670", ATTR{index}=="0", \
   SYMLINK+="bionicface-cam", TAG+="systemd", ENV{SYSTEMD_WANTS}+="camera-param-lock@video0.service"
 ```
 
@@ -317,5 +351,5 @@ python tools/camera_capture.py selftest --config tools/camera_params.json
    （证明 `exposure_dynamic_framerate=0` 生效、AE 未回退）。
 3. 遮挡镜头 2 秒再放开，画面亮度不做「呼吸」式自适应（证明 AE/AWB 已关）。
 4. 若该机型不暴露 `gain`（见 §4），必须在验收记录里写明「增益为冻结值而非定值」，并附
-   `verify` 的实际读数作为基线。
+   `verify` 的实际读数作为基线。**C100 实测暴露 `gain`（0..63），本条对 C100 不适用。**
 5. C100 已刷 `4.` 目录固件（见 §1.1），否则暗处曝光不可复现，前四条在暗场下不成立。

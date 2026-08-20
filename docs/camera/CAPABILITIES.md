@@ -33,7 +33,7 @@
 | 像元尺寸 | **冲突**：规格书 3.0 µm×3.0 µm / GC2053 手册 2.8 µm×2.8 µm | 3.0 µm×3.0 µm（两处一致） |
 | **快门类型** | 电子卷帘快门（Electronic rolling shutter，GC2053 手册 §1.4） | 电子卷帘快门（JX-H62 Key Specifications） |
 | 传感器满幅帧率 | 30 fps @ full size | 30 fps（720p native） |
-| **分辨率×帧率矩阵** | `UNKNOWN`，见下节 | `UNKNOWN`，见下节 |
+| **分辨率×帧率矩阵** | 资料 `UNKNOWN`；**已实测**，见「真机实测」一节 | `UNKNOWN`（无实机） |
 | 图片输出格式 | YUY(V) / MJPEG | YUY(V) / MJPEG |
 | **接口** | USB 2.0，免驱即插即用；随机 2.0 m USB 线 | USB 2.0，免驱即插即用；线长标注冲突（§1 为 1 m，§3 表格为 2.0 m） |
 | 协议 / SDK | 无厂商成像 SDK。资料仅含 Windows 固件升级工具 `ACamMP.exe` + `ACamSDK.dll`（配 `M2399A+2053.bin`），不是取流/调参 SDK。取流与调参走标准 UVC：Linux `/dev/videoN` + V4L2，或 OpenCV `VideoCapture` | 同左，且资料未提供任何 exe/dll |
@@ -41,8 +41,8 @@
 | 镜头 | 2.1 mm 标准镜头，可带 IRCUT | 2.8 mm 标准镜头，可带 IRCUT |
 | **FOV（标称）** | H 112°×V 80° / D 120°（另文述「对角线最大视角可达 120°」） | H 85°×V 47°（另文述「对角线最大视角可达 80°」） |
 | **FOV（推算，640×480）** | H 93.0°×V 76.9° / D 105.8° | H 58.0°×V 45.2° / D 69.8° |
-| **最近对焦距离** | `UNKNOWN`（资料全篇未出现最近对焦距离/MOD/景深） | `UNKNOWN` |
-| 对焦形式 | `UNKNOWN`（资料未说明定焦/手动螺纹调焦，也未提及自动对焦） | `UNKNOWN` |
+| **最近对焦距离** | `UNKNOWN`（资料全篇未出现最近对焦距离/MOD/景深，实测亦未做） | `UNKNOWN` |
+| 对焦形式 | 资料 `UNKNOWN`；**实测为定焦**，UVC 暴露的对焦控制项无实际作用，见「真机实测」 | `UNKNOWN`（无实机） |
 | **安装规格** | 见下节 | 见下节 |
 | AGC / 白平衡 / 背光补偿 | 出厂 Auto（规格书标称） | 出厂 Auto |
 | 信噪比 | > 48 dB | > 48 dB |
@@ -54,7 +54,7 @@
 | 支持系统 | Win7/Win8/WinXP SP2/Vista 免驱；WinXP SP1 支持安卓与苹果系统（原文如此） | 同左 |
 | 出厂测试 | 2 min 模拟震动、常温老化 4 h | 2 min 模拟震动、常温老化 4 h |
 
-## 分辨率×帧率：为什么是 UNKNOWN
+## 分辨率×帧率：资料为什么给不出（已由实机补齐）
 
 规格书只给出两个数：最高分辨率（C100 1920×1080 / C70 1280×720）和一句
 `图像帧率：CIF:1-4 路 30 帧实时`。后者是安防 DVR 语境下的说法，不是 UVC 档位表；资料里
@@ -71,8 +71,8 @@ v4l2-ctl -d /dev/video0 --all                # 当前协商格式 + 全部控制
 实测帧率（协商值与真实值常不同，尤其 USB 2.0 带宽受限时）用本仓库的
 `tools/camera_capture.py selftest`，它连拍并按单调时钟统计实际 fps。
 
-预期结论（未验证，仅供对照实测）：USB 2.0 480 Mbps 下 1920×1080@30 必须走 MJPEG，YUYV 只能
-跑到低分辨率档；具体档位以上面两条命令的输出为准。
+上述推断已由实机证实，完整档位表见「真机实测」一节：MJPG 每档都给 30 fps，YUYV 的高分辨率
+档位声明不可信。
 
 ## 安装规格
 
@@ -136,6 +136,98 @@ v4l2-ctl -d /dev/video0 --all                # 当前协商格式 + 全部控制
 定值——`相机标定、内参获取与畸变矫正/readme.txt` 原文即声明「内参数值只能表示大致数值……每个相机
 内参都会有细微差别」，需自行标定。资料附 A4 标定板 `标定板A4_9x6_25mm.pdf`（内角 9×6，方格 25 mm）。
 
+## 真机实测（C100，2026-08-21）
+
+测量环境：Windows 主机经 usbipd-win 把相机转发进 WSL2（Debian，内核 6.18 自带
+`uvcvideo`），工具为 `tools/camera_capture.py` 与 `tools/latency_check.py`。**下列数字来自实机，
+与上面「速查表」里的厂商标称值分开记录。**
+
+### 设备身份
+
+| 项 | 实测值 |
+| --- | --- |
+| VID:PID | `2ce3:c670` |
+| Manufacturer / Product | `Alcorlink Corp.` / `USB 2.0 Camera` |
+| USB 版本 | 2.01 |
+| V4L2 节点 | `/dev/video0`（`index=0`，capture）、`/dev/video1`（metadata） |
+| 机型判定 | **C100**。厂商固件包名 `M2399A+2053.bin` = Alcorlink M2399A 控制器 + GC2053 传感器，与实测 vendor 字符串及 1920×1080 最高档一致 |
+
+### 分辨率×帧率（UVC 描述符枚举，等价 `v4l2-ctl --list-formats-ext`）
+
+| fourcc | 分辨率 | 描述符声明的 fps |
+| --- | --- | --- |
+| MJPG（压缩） | 1920×1080 / 1280×1024 / 1280×720 / 1152×864 / 640×480 | 30, 25, 20, 15, 10, 5（每档相同） |
+| YUYV | 1920×1080 | 30, 25, 20, 15, 10, 5 |
+| YUYV | 1280×720 | 30, 25, 20, 15, 10, 5 |
+| YUYV | 1152×864 | 10, 5 |
+| YUYV | 1280×1024 | 8, 5 |
+| YUYV | 640×480 | 5 |
+
+**YUYV 的档位表不可信**：640×480 只给 5 fps，却声称 1920×1080 能跑 30 fps —— 后者约合
+124 MB/s，USB 2.0（理论 60 MB/s，实际约 40）根本放不下，而且两条声明互相矛盾。
+另外 1280×720 在两种格式下都重复出现两次（首条 fps 列表还是双份），是这批固件的描述符缺陷。
+**结论：只用 MJPG。** 实测 640×480 MJPG @30 稳定在 29.5~30.4 fps。
+
+### 曝光时间与帧率的硬耦合（重要）
+
+`exposure_dynamic_framerate=0`（V4L2_CID_EXPOSURE_AUTO_PRIORITY，语义为「帧率必须恒定」）
+**在这台相机上不被遵守**。实测帧率随曝光时间线性下降，fps ≈ 1/曝光时间：
+
+| `exposure_time_absolute` | 曝光 | 实测 fps | 全帧亮度均值 |
+| --- | --- | --- | --- |
+| ≤ 300 | ≤ 30 ms | 30.25 | 135（@300） |
+| 333 | 33.3 ms | 29.58 | 141 |
+| 400 | 40 ms | 24.60 | 150 |
+| 600 | 60 ms | 16.45 | 167 |
+| 1000 | 100 ms | 9.97 | 186 |
+
+全程 `cap.get(CAP_PROP_FPS)` 都报 30 —— 驱动只回报协商的帧间隔，不反映真实吞吐。
+**所以 30 fps 的曝光上限是 300（30 ms），且这个约束只能靠实测发现**，这也是
+`camera_capture.py selftest` 与 `latency_check.py` 存在的理由。
+
+### 控制项实测（19 项，全部可写并回读一致）
+
+比文档预期多 4 项：`hue` 与数字 `pan_absolute` / `tilt_absolute` / `zoom_absolute`。
+后三项会裁切并重构图，zoom 漂了等于机位动了，已一并纳入锁定集合。
+
+| 控制项 | 范围 / 步长 / 默认 | 实测结论 |
+| --- | --- | --- |
+| `auto_exposure` | 0..3 def 3 | 出厂为 3（Aperture Priority，即自动）；锁定写 1 |
+| `exposure_time_absolute` | 78..2500 step 1 def 312 | 单位 100 µs，实测有效且线性影响亮度；受上面的帧率耦合约束 |
+| `exposure_dynamic_framerate` | 0..1 def 0 | 出厂读到 1；写 0 可回读，但**不生效**（见上） |
+| `white_balance_temperature` | 2500..9500 step 1 def 5000 | **有效**：R/B 从 1.21(2500K) 单调升到 8.84(9500K)。但 AWB 开启时该项停在下限 2500，**不回报 AWB 的实际结果** |
+| `gain` | 0..63 def 0 | 存在，可显式定值 —— `PARAM_LOCK.md §4`「增益的坑」在这台相机上不成立 |
+| `focus_absolute` | 2048..8192 def 4096 | **无实际作用**：全行程扫描清晰度 99.0 / 97.0 / 85.2 / 90.5，无单调趋势，波动量级与场景噪声相当。真实对焦需机械调整。（保留一点存疑：测试场景可能整体落在景深内） |
+| `focus_automatic_continuous` | 0..1 def 1 | 出厂开启；虽然对焦控制项无效，仍写 0 以求确定性 |
+| `gamma` | 30..140 **step 5** def 35 | 厂商 `set.cpp` 声明的 `100~500` 是错的；教程推荐的 40 恰好在步长上且合法 |
+| `brightness` | -512..511 def 0 | 厂商 `set.cpp` 声明 -64..64，错 |
+| `contrast` / `saturation` | 0..255 def 140 / 138 | 厂商 `set.cpp` 声明 0..100，错 |
+| `sharpness` | 0..15 def 5 | 厂商 `set.cpp` 声明 0..100，错 |
+| `pan_absolute` / `tilt_absolute` | ±288000 / ±216000 step 3600 def 0 | 数字平移 |
+| `zoom_absolute` | 2..15 def 2 | 数字变焦，默认即最小 |
+
+厂商示例 `cam_usb_set/set.cpp` 里几乎所有量程声明都与实机不符，且它对越界值静默 clamp。
+这验证了本仓库的取舍：范围一律以 `VIDIOC_QUERYCTRL` 为准，越界直接报错。
+
+### 端到端链路（`latency_check.py`，640×480 MJPG @30，检出率 97.7%）
+
+| 阶段 | p50 | p95 | 说明 |
+| --- | --- | --- | --- |
+| grab | 21.80 ms | 24.35 ms | 主要是等下一帧 |
+| inference | 10.16 ms | 11.61 ms | FaceLandmarker IMAGE 模式，约 3 倍余量 |
+| 端到端 | 32.07 ms | 35.02 ms | ≈ 帧间隔 + 推理 |
+
+实测 30.35 fps。注意**没检出人脸时推理只要 2.48 ms**（管线短路），所以低检出率下的计时数字
+没有意义 —— `latency_check.py` 因此加了检出率阈值。
+
+### 已知不稳定：USB/IP 会掉线
+
+一次 640×480 MJPG @30 的连续流在第 29 帧掉线：内核日志 `urb->status -104`（ECONNRESET）、
+`uvcvideo: Non-zero status (-62)`、`vhci_hcd: connection closed` → `usb 1-1: USB disconnect`，
+usbipd 状态从 `Attached` 退回 `Shared`。重新 attach 后同样配置连续跑 35 秒 1031 帧
+（29.45 fps）无问题，故判定为偶发而非必然。USB/IP 用 TCP 承载等时视频流，这是它的固有弱点。
+**噪声底等长时间录制建议在真 Linux 机器上做，或至少对掉线重试并记录。**
+
 ## 资料内部矛盾（选型/建模前需确认的项）
 
 1. **C100 像元尺寸**：规格书 3.0 µm×3.0 µm vs GC2053 手册 2.8 µm×2.8 µm。1/2.9″ 上放 1920×1080
@@ -155,12 +247,12 @@ v4l2-ctl -d /dev/video0 --all                # 当前协商格式 + 全部控制
 
 | UNKNOWN 项 | 获取办法 |
 | --- | --- |
-| 分辨率×帧率档位表 | `v4l2-ctl -d /dev/video0 --list-formats-ext` |
+| ~~分辨率×帧率档位表~~ | **已实测**，见「真机实测」；重测用 `v4l2-ctl --list-formats-ext` |
 | 实际可持续帧率 | `python tools/camera_capture.py selftest`（连拍 100 帧统计） |
 | 最近对焦距离 | 资料无。实测：标定板逐步靠近直至 MTF 明显下降，记录临界距离 |
-| 对焦形式（定焦/可调） | 目视镜筒是否有调焦螺纹与点胶；`v4l2-ctl -l` 是否出现 `focus_absolute` |
+| ~~对焦形式（定焦/可调）~~ | **已实测为定焦**，对焦控制项存在但无作用，见「真机实测」 |
 | C100 PCB 板宽、两机型安装孔中心距、C100 外壳安装接口 | 量 `3.三维模型/*.stp` |
 | 支持的控制项及其 min/max/step/default | `python tools/camera_capture.py list`（或 `v4l2-ctl -d /dev/video0 -L`） |
-| VID/PID、UVC 版本 | `lsusb -v -d <vid:pid>`；资料未给出 VID/PID |
+| ~~VID/PID、UVC 版本~~ | **已实测**：`2ce3:c670`，Alcorlink Corp.，USB 2.01 |
 
 参数锁定（关自动曝光/白平衡/增益/对焦）见 [`PARAM_LOCK.md`](PARAM_LOCK.md)。

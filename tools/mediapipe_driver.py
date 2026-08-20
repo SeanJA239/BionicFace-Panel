@@ -13,6 +13,12 @@ command source.
 
 Usage:
     python3 tools/mediapipe_driver.py --model face_landmarker.task [--preview]
+    python3 tools/mediapipe_driver.py --camera-config tools/camera_params.json
+
+The second form opens the camera through tools/camera_capture.py, which locks
+and verifies every imaging parameter first. Use it for anything whose output
+gets recorded -- see docs/camera/PARAM_LOCK.md for why an unlocked camera makes
+a dataset unreproducible.
 
 See README.md for dependency installation and the model download link.
 """
@@ -235,6 +241,17 @@ def parse_args() -> argparse.Namespace:
         "--camera", type=int, default=0, help="OpenCV camera index (default 0)"
     )
     parser.add_argument(
+        "--camera-config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a camera_capture.py parameter set (e.g. tools/camera_params.json). "
+            "When given, the camera is opened through camera_capture.Camera and its "
+            "imaging parameters are locked and verified -- required for capture runs "
+            "that must be reproducible. When omitted, a plain VideoCapture is used."
+        ),
+    )
+    parser.add_argument(
         "--model",
         type=Path,
         default=Path(__file__).resolve().with_name("face_landmarker.task"),
@@ -298,6 +315,70 @@ def draw_preview(
         surface.blit(label, (bar_x0 - 24, y))
 
 
+def open_frame_source(
+    args: argparse.Namespace, cv2: Any
+) -> tuple[Any, tuple[int, int], Any]:
+    """Opens the camera and returns (read, (width, height), close).
+
+    `read()` returns a BGR frame, or None when the stream ends cleanly.
+
+    Two modes on purpose. With --camera-config the frames come from
+    camera_capture.Camera, which negotiates the format strictly and locks every
+    imaging parameter -- that is the mode any recorded dataset must use. Without
+    it a plain VideoCapture is used, but the format is still requested
+    explicitly: leaving it to the driver's default is how this pipeline ended up
+    negotiating YUYV 640x480, which on the WHEELTEC C100 caps at 5 fps and
+    measured 3.3 -- while this process happily claimed to send at 30Hz.
+    """
+    if args.camera_config is not None:
+        from camera_capture import Camera, CaptureConfig
+
+        config = CaptureConfig.load(args.camera_config)
+        camera = Camera(config)
+        camera.open()
+        locked = camera.lock_params()
+        print(
+            f"camera {config.device}: {camera.negotiated_format()}, "
+            f"{len(locked)} imaging parameters locked"
+        )
+        return (
+            (lambda: camera.grab().image),
+            (config.width, config.height),
+            camera.close,
+        )
+
+    capture = cv2.VideoCapture(args.camera)
+    if not capture.isOpened():
+        raise SystemExit(f"Could not open camera index {args.camera}")
+    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc(*"MJPG"))
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    capture.set(cv2.CAP_PROP_FPS, SEND_HZ)
+
+    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
+    negotiated_fps = capture.get(cv2.CAP_PROP_FPS)
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    print(
+        f"camera index {args.camera}: "
+        f"{''.join(chr((fourcc >> shift) & 0xFF) for shift in (0, 8, 16, 24))} "
+        f"{width}x{height} @ {negotiated_fps:g}fps"
+    )
+    if negotiated_fps < SEND_HZ * 0.9:
+        print(
+            f"WARNING: the camera negotiated {negotiated_fps:g} fps but this process "
+            f"sends at {SEND_HZ}Hz, so most frames will be stale repeats. Pick a mode "
+            f"the camera can actually sustain (`v4l2-ctl --list-formats-ext`), or pass "
+            f"--camera-config to negotiate and lock a known-good one."
+        )
+
+    def read() -> Any:
+        ok, frame = capture.read()
+        return frame if ok else None
+
+    return read, (width, height), capture.release
+
+
 def main() -> None:
     args = parse_args()
 
@@ -330,9 +411,7 @@ def main() -> None:
     )
     landmarker = face_landmarker_cls.create_from_options(options)
 
-    capture = cv2.VideoCapture(args.camera)
-    if not capture.isOpened():
-        raise SystemExit(f"Could not open camera index {args.camera}")
+    read_frame, (cam_width, cam_height), close_camera = open_frame_source(args, cv2)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     filter_bank = FilterBank(
@@ -344,8 +423,6 @@ def main() -> None:
         import pygame
 
         pygame.init()
-        cam_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-        cam_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
         preview_surface = pygame.display.set_mode(
             (cam_width + 220, max(cam_height, 32 * 14))
         )
@@ -358,8 +435,8 @@ def main() -> None:
 
     try:
         while True:
-            ok, frame_bgr = capture.read()
-            if not ok:
+            frame_bgr = read_frame()
+            if frame_bgr is None:
                 break
 
             if preview_surface is not None:
@@ -402,7 +479,7 @@ def main() -> None:
 
                 pygame.display.flip()
     finally:
-        capture.release()
+        close_camera()
         if preview_surface is not None:
             import pygame
 

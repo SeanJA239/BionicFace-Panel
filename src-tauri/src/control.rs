@@ -2611,7 +2611,12 @@ mod tests {
         let status_active = service.external_input_status().await;
         assert!(
             status_active.active,
-            "external frame should claim control_source"
+            "external frame should claim control_source. This test binds the real \
+             external input port ({}) from motor_config.json, and the listener only \
+             warns and gives up if the bind fails -- so it also fails whenever \
+             something else already holds that port, the running app included. \
+             Close the app before running the suite.",
+            status_before.port
         );
         assert_eq!(status_active.last_seq, Some(1));
 

@@ -50,11 +50,35 @@ SEND_HZ = 30
 # minApplied, 1 -> maxApplied, see README's "控制源仲裁与外部输入"), NOT
 # control.rs's internal bipolar preset norm space.
 #
+# The numbers below are derived from the channel calibration rather than
+# hand-picked, by two rules:
+#
+#   bias   -- the entries' biases sum to the coefficient of the channel's
+#             calibrated neutral, `(neutralApplied - minApplied) / span`. At a
+#             neutral face every score is ~0, so this is exactly where the
+#             channel rests, and it has to be the calibrated neutral or the
+#             pose is wrong the moment this process takes over.
+#   weight -- weights pushing the same way are scaled so their sum equals the
+#             travel remaining in that direction, so a blendshape score of 1.0
+#             reaches the limit without clamping. Scaling the group
+#             proportionally preserves the authored relative influence between
+#             blendshapes on one channel.
+#
+# That makes this table a function of the channel limits: rerun
+# `tools/check_neutral.py` after any recalibration, and expect to regenerate
+# these numbers if a limit or neutral moves.
+#
 # MediaPipe blendshape L/R names refer to the SUBJECT's own left/right (not
 # camera/mirror left/right), which is assumed here to line up with this
 # repo's channel naming (also subject-relative, e.g. `eyebrow_left_inner`).
 # Verify this assumption once real hardware is on the bench -- if the face
 # mirrors instead of matching, swap the Left/Right blendshape names below.
+#
+# Weight *signs* are still mostly unverified: they encode which applied
+# direction each blendshape moves a channel, which is a mounting fact. Only the
+# eyelid signs have hardware evidence so far (see channel 11 below). Use
+# `--preview`, whose bars now carry a neutral reference tick, to check each
+# direction, its range and its cross-talk one action at a time.
 #
 # Channels not listed here are left unmapped (the frame sends `null` for
 # them, meaning "not driven by this frame" per control.rs's external-input
@@ -64,67 +88,97 @@ SEND_HZ = 30
 # no head-pose blendshape) are left for a future mapping pass.
 BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     # Eyebrows (0-3). browInnerUp lifts both inner brows together; browDown
-    # is per-side. Physical meaning of 0/1 per channel: 0 = eyebrow at its
-    # calibrated minApplied, 1 = maxApplied -- TODO confirm this reads as
-    # "relaxed -> raised" and not the reverse once on hardware.
-    0: [("browInnerUp", 0.6, 0.4), ("browDownRight", -0.6, 0.0)],  # eyebrow_right_inner
-    1: [("browDownRight", -0.6, 0.5)],  # eyebrow_right_outer
-    2: [("browInnerUp", 0.6, 0.4), ("browDownLeft", -0.6, 0.0)],  # eyebrow_left_inner
-    3: [("browDownLeft", -0.6, 0.5)],  # eyebrow_left_outer
+    # is per-side.
+    #
+    # Channel 0's calibrated neutral sits exactly at its maxApplied, so it has
+    # no upward travel at all and browInnerUp cannot move it -- that entry is
+    # left at its authored weight so check_neutral keeps reporting the clamp,
+    # rather than being scaled to zero and disappearing quietly. Its mirror,
+    # channel 2, rests near the opposite end (coefficient 0.133), which looks
+    # like the same mirrored-mounting story already confirmed on eyelid channel
+    # 11. Settle it on hardware: either browInnerUp's sign is inverted here, or
+    # this channel's neutral/limits need recalibrating.
+    0: [("browInnerUp", 0.6, 1.0), ("browDownRight", -1.0, 0.0)],  # eyebrow_right_inner
+    1: [("browDownRight", -0.625, 0.625)],  # eyebrow_right_outer
+    # Channel 2 rests at coefficient 0.133, so brow-down has only 15% of the
+    # travel that brow-up does. Not a mapping fault -- the neutral is calibrated
+    # near the bottom of this channel's range.
+    2: [
+        ("browInnerUp", 0.867, 0.133),
+        ("browDownLeft", -0.133, 0.0),
+    ],  # eyebrow_left_inner
+    3: [("browDownLeft", -0.55, 0.55)],  # eyebrow_left_outer
     # Eyes (8-13). 8/13 are each a *single shared* mechanism driving both
     # eyeballs (see config.py's MOTOR_MAP comments), so both eyes' gaze
-    # blendshapes are averaged into one signed-around-0.5 value. Sign
-    # convention (which direction is "out"/"up") is a guess -- TODO verify.
-    8: [  # eye_horizontal (shared gaze X)
-        ("eyeLookOutRight", 0.25, 0.5),
-        ("eyeLookInRight", -0.25, 0.0),
-        ("eyeLookInLeft", 0.25, 0.0),
-        ("eyeLookOutLeft", -0.25, 0.0),
+    # blendshapes are averaged into one signed value around the neutral.
+    8: [  # eye_horizontal (shared gaze X); out has 3x the travel of in
+        ("eyeLookOutRight", 0.375, 0.25),
+        ("eyeLookInRight", -0.125, 0.0),
+        ("eyeLookInLeft", 0.375, 0.0),
+        ("eyeLookOutLeft", -0.125, 0.0),
     ],
     13: [  # eye_vertical (shared gaze Y)
-        ("eyeLookUpRight", 0.25, 0.5),
-        ("eyeLookDownRight", -0.25, 0.0),
-        ("eyeLookUpLeft", 0.25, 0.0),
-        ("eyeLookDownLeft", -0.25, 0.0),
+        ("eyeLookUpRight", 0.143, 0.714),
+        ("eyeLookDownRight", -0.357, 0.0),
+        ("eyeLookUpLeft", 0.143, 0.0),
+        ("eyeLookDownLeft", -0.357, 0.0),
     ],
-    9: [("eyeBlinkLeft", 1.0, 0.0)],  # eye_left_upper: 0=open, 1=closed (TODO confirm)
-    10: [("eyeBlinkLeft", 1.0, 0.0)],  # eye_left_lower
-    11: [("eyeBlinkRight", 1.0, 0.0)],  # eye_right_upper
-    12: [("eyeBlinkRight", 1.0, 0.0)],  # eye_right_lower
+    # Eyelids (9-12): the blendshape is eye *closure*, so each weight points
+    # from the resting-open coefficient towards that channel's closed end.
+    # Which end that is comes from control.rs's BLINK_CLOSE_DIRECTIONS, which
+    # was checked against real hardware: closed is the high end for 9/10/12 and
+    # the low end for 11, whose servo is mounted mirrored -- hence the negative
+    # weight there. Channel 12's direction is still marked unconfirmed in that
+    # table; if idle blink looks wrong on the right lower lid, flip 12 too.
+    # Channels 9 and 12 rest at 0.722, leaving only 0.278 of closing travel, so
+    # a full blink will not look like much until those neutrals are revisited.
+    9: [("eyeBlinkLeft", 0.278, 0.722)],  # eye_left_upper
+    10: [("eyeBlinkLeft", 0.578, 0.422)],  # eye_left_lower
+    11: [("eyeBlinkRight", -0.677, 0.677)],  # eye_right_upper (mirrored mount)
+    12: [("eyeBlinkRight", 0.278, 0.722)],  # eye_right_lower
     # Mouth (14-23). Upper/lower lip channels respond to pucker (both sides)
-    # plus their own side's "upper lip up"/"lower lip down". Mouth corners:
-    # smile raises the corner, frown lowers it -- baseline 0.4-0.5 so both
-    # directions have room to move away from a resting coefficient.
-    14: [("mouthUpperUpLeft", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # upper_lip_left
-    15: [("mouthPucker", 0.7, 0.3)],  # upper_lip_mid
-    16: [("mouthUpperUpRight", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # upper_lip_right
+    # plus their own side's "upper lip up"/"lower lip down"; the corner channels
+    # are driven by smile against frown, with the lower corners moving opposite
+    # to the upper ones.
+    14: [
+        ("mouthUpperUpLeft", 0.139, 0.75),
+        ("mouthPucker", 0.111, 0.0),
+    ],  # upper_lip_left
+    15: [("mouthPucker", 0.75, 0.25)],  # upper_lip_mid
+    16: [
+        ("mouthUpperUpRight", 0.435, 0.217),
+        ("mouthPucker", 0.348, 0.0),
+    ],  # upper_lip_right
     17: [
-        ("mouthSmileRight", 0.6, 0.4),
-        ("mouthFrownRight", -0.6, 0.0),
+        ("mouthSmileRight", 0.556, 0.444),
+        ("mouthFrownRight", -0.444, 0.0),
     ],  # mouth_right_corner_upper
     18: [
         ("mouthFrownRight", 0.5, 0.5),
-        ("mouthSmileRight", -0.3, 0.0),
+        ("mouthSmileRight", -0.5, 0.0),
     ],  # mouth_right_corner_lower
     19: [
-        ("mouthSmileLeft", 0.6, 0.4),
-        ("mouthFrownLeft", -0.6, 0.0),
+        ("mouthSmileLeft", 0.55, 0.45),
+        ("mouthFrownLeft", -0.45, 0.0),
     ],  # mouth_left_corner_upper
     20: [
-        ("mouthFrownLeft", 0.5, 0.5),
-        ("mouthSmileLeft", -0.3, 0.0),
+        ("mouthFrownLeft", 0.667, 0.333),
+        ("mouthSmileLeft", -0.333, 0.0),
     ],  # mouth_left_corner_lower
-    21: [("mouthLowerDownLeft", 0.5, 0.4), ("mouthPucker", 0.4, 0.0)],  # lower_lip_left
+    21: [
+        ("mouthLowerDownLeft", 0.486, 0.125),
+        ("mouthPucker", 0.389, 0.0),
+    ],  # lower_lip_left
     22: [
-        ("mouthLowerDownRight", 0.5, 0.4),
-        ("mouthPucker", 0.4, 0.0),
+        ("mouthLowerDownRight", 0.556, 0.0),
+        ("mouthPucker", 0.444, 0.0),
     ],  # lower_lip_right
-    23: [("mouthPucker", 0.7, 0.3)],  # lower_lip_mid_tendon
+    23: [("mouthPucker", 0.364, 0.636)],  # lower_lip_mid_tendon
     # Jaw (24/25). jawOpen drives the primary jaw-open channel per the task
     # spec; 26/27 are intentionally absent -- control.rs's jaw coupling
     # drives them from 25's target, not this process.
-    24: [("jawLeft", 0.4, 0.5), ("jawRight", -0.4, 0.0)],  # jaw_horizontal
-    25: [("jawOpen", 1.0, 0.0)],  # jaw_right_upper (main jaw-open axis)
+    24: [("jawLeft", 0.508, 0.492), ("jawRight", -0.492, 0.0)],  # jaw_horizontal
+    25: [("jawOpen", 0.471, 0.529)],  # jaw_right_upper (main jaw-open axis)
 }
 
 # Every mapped channel gets its own One Euro Filter instance; channels not
@@ -244,11 +298,12 @@ def parse_args() -> argparse.Namespace:
         "--camera", type=int, default=0, help="OpenCV camera index (default 0)"
     )
     parser.add_argument(
-        "--neutral-preset",
-        default="rest",
+        "--no-neutral-reference",
+        action="store_true",
         help=(
-            "Preset whose pose is drawn as the neutral reference on --preview's "
-            "bars (default rest). Pass an empty string to draw no reference."
+            "Omit the neutral reference tick from --preview's bars. The tick "
+            "marks each channel's calibrated neutral, which is what the bars are "
+            "read against when checking a channel's direction and range."
         ),
     )
     parser.add_argument(
@@ -460,14 +515,13 @@ def main() -> None:
         import pygame
 
         pygame.init()
-        if args.neutral_preset:
+        if not args.no_neutral_reference:
             # The reference comes from check_neutral so there is one definition
             # of "where neutral should be", rather than this file deriving it.
             from check_neutral import DEFAULT_CONFIG, neutral_targets
 
             neutral_reference = neutral_targets(
-                json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8")),
-                args.neutral_preset,
+                json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
             )
         preview_surface = pygame.display.set_mode(
             (cam_width + 320, max(cam_height, 32 * 14))

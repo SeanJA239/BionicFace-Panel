@@ -74,11 +74,29 @@ SEND_HZ = 30
 # Verify this assumption once real hardware is on the bench -- if the face
 # mirrors instead of matching, swap the Left/Right blendshape names below.
 #
-# Weight *signs* are still mostly unverified: they encode which applied
-# direction each blendshape moves a channel, which is a mounting fact. Only the
-# eyelid signs have hardware evidence so far (see channel 11 below). Use
-# `--preview`, whose bars now carry a neutral reference tick, to check each
-# direction, its range and its cross-talk one action at a time.
+# Weight *signs* encode which applied direction each blendshape moves a channel,
+# which is a mounting fact. The subject's-right servos turn out to be mounted
+# mirrored relative to the subject's-left ones, so a symmetric expression needs
+# opposite norm signs on the two sides.
+#
+# That was read off the emotion presets, which are authored on hardware and
+# reach their poses, so they serve as ground truth. Restricting the comparison
+# to the presets that should be left/right symmetric (喜悦/悲伤/愤怒/惊讶/恐惧 --
+# 困惑 and wink are deliberately asymmetric), five right-side channels come out
+# unambiguously mirrored: 0, 1, 11, 17, 18. Their weights are negated here
+# relative to their left-side twins. Channel 11 was independently confirmed on
+# hardware for the idle blink (see control.rs BLINK_CLOSE_DIRECTIONS), which is
+# what gives this inference its credibility.
+#
+# Three right-side channels contradict themselves across those presets and are
+# left alone until someone checks them on hardware: 12 (eye_right_lower, 2 vs 2),
+# 16 (upper_lip_right, 1 vs 1) and 22 (lower_lip_right, 2 vs 1). Channel 25 has
+# no mapped left twin (26/27 come from Rust's jaw coupling), so nothing to
+# compare against.
+#
+# Everything else about the signs is still unverified. Use `--preview`, whose
+# bars carry a neutral reference tick, to check each direction, its range and
+# its cross-talk one action at a time.
 #
 # Channels not listed here are left unmapped (the frame sends `null` for
 # them, meaning "not driven by this frame" per control.rs's external-input
@@ -90,16 +108,18 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     # Eyebrows (0-3). browInnerUp lifts both inner brows together; browDown
     # is per-side.
     #
-    # Channel 0's calibrated neutral sits exactly at its maxApplied, so it has
-    # no upward travel at all and browInnerUp cannot move it -- that entry is
-    # left at its authored weight so check_neutral keeps reporting the clamp,
-    # rather than being scaled to zero and disappearing quietly. Its mirror,
-    # channel 2, rests near the opposite end (coefficient 0.133), which looks
-    # like the same mirrored-mounting story already confirmed on eyelid channel
-    # 11. Settle it on hardware: either browInnerUp's sign is inverted here, or
-    # this channel's neutral/limits need recalibrating.
-    0: [("browInnerUp", 0.6, 1.0), ("browDownRight", -1.0, 0.0)],  # eyebrow_right_inner
-    1: [("browDownRight", -0.625, 0.625)],  # eyebrow_right_outer
+    # Channel 0's calibrated neutral sits exactly at its maxApplied, so it can
+    # only move downward. Once mirrored, that is the raising direction, and
+    # browInnerUp gets the channel's full travel -- the problem that looked like
+    # it needed a limit change disappears with the sign.
+    #
+    # browDownRight is left mapped here with no room to move, so check_neutral
+    # keeps reporting it rather than it being scaled to zero and disappearing.
+    # It probably does not belong on this channel at all: 愤怒, the preset that
+    # lowers the brows, leaves channel 0 at 0.00 and does the lowering with the
+    # outer brow channels instead.
+    0: [("browInnerUp", -1.0, 1.0), ("browDownRight", 1.0, 0.0)],  # eyebrow_right_inner
+    1: [("browDownRight", 0.375, 0.625)],  # eyebrow_right_outer
     # Channel 2 rests at coefficient 0.133, so brow-down has only 15% of the
     # travel that brow-up does. Not a mapping fault -- the neutral is calibrated
     # near the bottom of this channel's range.
@@ -150,12 +170,12 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
         ("mouthPucker", 0.348, 0.0),
     ],  # upper_lip_right
     17: [
-        ("mouthSmileRight", 0.556, 0.444),
-        ("mouthFrownRight", -0.444, 0.0),
+        ("mouthSmileRight", -0.444, 0.444),
+        ("mouthFrownRight", 0.556, 0.0),
     ],  # mouth_right_corner_upper
     18: [
-        ("mouthFrownRight", 0.5, 0.5),
-        ("mouthSmileRight", -0.5, 0.0),
+        ("mouthFrownRight", -0.5, 0.5),
+        ("mouthSmileRight", 0.5, 0.0),
     ],  # mouth_right_corner_lower
     19: [
         ("mouthSmileLeft", 0.55, 0.45),

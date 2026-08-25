@@ -15,11 +15,21 @@ import type { MotorChannel } from "./tauri";
 // internal norm state -- so it reconstructs the same bipolar deviation
 // locally via Channel.deviation(), mirroring face_visualizer.py exactly.
 // Direction conventions (brow raised, lid closed, corner up, jaw open) are
-// the same unconfirmed assumptions as that Python renderer.
+// the same assumptions as that Python renderer, and still unconfirmed except
+// for the mirroring below.
 
 const VIEW_WIDTH = 900;
 const VIEW_HEIGHT = 720;
 const FACE_CENTER: readonly [number, number] = [450, 380];
+
+// The subject's-right servos are mounted mirrored relative to the left ones, so
+// a symmetric expression arrives with opposite norm signs on the two sides.
+// Read off the hardware-authored emotion presets (see the same note in
+// tools/mediapipe_driver.py); channel 11 is independently confirmed by
+// control.rs's idle-blink direction table. Channels 12, 16 and 22 contradict
+// themselves across those presets and are deliberately left un-mirrored until
+// someone checks them on hardware.
+const MIRRORED_CHANNELS: ReadonlySet<number> = new Set([0, 1, 11, 17, 18]);
 
 const LINE_COLOR = "#d7e2f0";
 const OUTLINE_COLOR = "#96a4ba";
@@ -160,7 +170,12 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
   }
 
   const nodes: Record<number, Point> = {};
-  const dev = (id: number) => deviation(channels[id], applied[id]);
+  // Mirrored channels are flipped here, at the one place deviations enter the
+  // renderer, so everything below keeps reading "+ = raised / closed / up".
+  const dev = (id: number) => {
+    const value = deviation(channels[id], applied[id]);
+    return MIRRORED_CHANNELS.has(id) ? -value : value;
+  };
 
   const tiltRad = tiltRadiansFromDelta(dev(30) - dev(31));
 

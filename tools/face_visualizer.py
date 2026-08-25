@@ -14,7 +14,7 @@ raspi/config.py / motor_config.json (the old topology.ts ids 8-13 and 24-27
 meant different things and are NOT reused). Direction conventions --
 which end of a channel's range reads as "brow raised", "lid closed",
 "corner up" -- follow tools/mediapipe_driver.py's documented assumptions
-and are unconfirmed until hardware calibration.
+and are still unconfirmed except for the mirroring below.
 
 Usage:
     python3 tools/face_visualizer.py [--host 0.0.0.0] [--port 6000] [--config PATH]
@@ -73,6 +73,15 @@ LOST_COLOR = (230, 60, 60)
 
 # Anchor dot palette per channel group, carried over from the original
 # frontend topology view.
+# The subject's-right servos are mounted mirrored relative to the left ones, so
+# a symmetric expression arrives with opposite norm signs on the two sides.
+# Read off the hardware-authored emotion presets (see the same note in
+# tools/mediapipe_driver.py); channel 11 is independently confirmed by
+# control.rs's idle-blink direction table. Channels 12, 16 and 22 contradict
+# themselves across those presets and are deliberately left un-mirrored until
+# someone checks them on hardware.
+MIRRORED_CHANNELS = frozenset({0, 1, 11, 17, 18})
+
 GROUP_COLORS = {
     "brow": (249, 115, 22),
     "tendon": (239, 68, 68),
@@ -258,7 +267,14 @@ class FaceRenderer:
         self.font_big = pygame.font.SysFont("monospace", 36, bold=True)
 
     def dev(self, channel_id: int, angles: list[float]) -> float:
-        return self.channels[channel_id].deviation(angles[channel_id])
+        """Deviation with the mirrored channels already flipped.
+
+        Negating here, at the one place deviations enter the renderer, lets
+        every part below keep reading "+ = brow raised / lid closed / corner
+        up" regardless of which way that channel's servo is mounted.
+        """
+        value = self.channels[channel_id].deviation(angles[channel_id])
+        return -value if channel_id in MIRRORED_CHANNELS else value
 
     def tilt_radians(self, angles: list[float]) -> float:
         delta = self.dev(30, angles) - self.dev(31, angles)

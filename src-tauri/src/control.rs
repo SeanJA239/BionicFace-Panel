@@ -58,10 +58,22 @@ const BLINK_CLOSE_DURATION: Duration = Duration::from_millis(80);
 const BLINK_HOLD_DURATION: Duration = Duration::from_millis(60);
 const BLINK_OPEN_DURATION: Duration = Duration::from_millis(120);
 const BLINK_EYELID_CHANNELS: [usize; 4] = [9, 10, 11, 12];
-// Direction assumption for "closed" -- same convention as
-// tools/face_visualizer.py's eyelid coverage mapping, unconfirmed against
-// real hardware. TODO: verify once the eyelid mechanism is on a bench.
+// `+1` norm is "closed" for three of the four eyelid channels; channel 11
+// (eye_right_upper) is mounted so its rotation direction is mirrored, so
+// its closed end is `-1`. Confirmed on real hardware during idle-blink
+// observation. Channel 12 (eye_right_lower) is left at `+1` for now --
+// unconfirmed whether it needs the same mirroring, revisit if it looks
+// wrong during idle blink too.
 const BLINK_CLOSED_NORM: f32 = 1.0;
+const BLINK_CLOSE_DIRECTIONS: [(usize, f32); 4] = [(9, 1.0), (10, 1.0), (11, -1.0), (12, 1.0)];
+
+fn blink_close_direction(channel_id: usize) -> f32 {
+    BLINK_CLOSE_DIRECTIONS
+        .iter()
+        .find(|(id, _)| *id == channel_id)
+        .map(|(_, dir)| *dir)
+        .unwrap_or(1.0)
+}
 // Idle noise's per-tick exponential smoothing rate towards its current
 // random retarget value, tuned so it settles within roughly one retarget
 // period rather than snapping.
@@ -1667,7 +1679,8 @@ fn update_blink(state: &mut InnerState) {
 fn start_blink_transition(state: &mut InnerState, target_norm: f32, duration: Duration) {
     let mut end = state.target_applied.clone();
     for &channel_id in &BLINK_EYELID_CHANNELS {
-        end[channel_id] = state.channels[channel_id].norm_to_applied(target_norm);
+        let signed_norm = target_norm * blink_close_direction(channel_id);
+        end[channel_id] = state.channels[channel_id].norm_to_applied(signed_norm);
     }
     start_transition(state, end, duration, EasingKind::EaseInOutCubic);
 }
@@ -1834,16 +1847,8 @@ fn spawn_udp_heartbeat(
                 let mut state = state.lock().await;
                 let state = &mut *state;
 
-                if state.control_source == ControlSource::External {
-                    let timed_out = state
-                        .external_last_frame_at
-                        .is_none_or(|last| last.elapsed() > state.external_input_timeout);
-                    if timed_out {
-                        // Targets are left exactly where they are: falling
-                        // back to Manual must not snap the pose back.
-                        state.control_source = ControlSource::Manual;
-                        info!("external control source timed out, falling back to Manual");
-                    }
+                if update_external_source_timeout(state) {
+                    info!("external control source timed out, falling back to Manual");
                 }
 
                 advance_active_transition(state);
@@ -1981,6 +1986,41 @@ fn spawn_external_input_listener(state: Arc<Mutex<InnerState>>, port: u16) {
             }
         }
     });
+}
+
+/// Drops the control source back to `Manual` once the external source has gone
+/// quiet for longer than its configured timeout. Returns whether it fell back,
+/// so the caller can log it.
+///
+/// Split out of the heartbeat loop for the same reason as
+/// `apply_external_frame_locked`: arbitration timing is the part worth testing,
+/// and it should not require a tokio runtime to reach.
+///
+/// The per-session sequence tracking is cleared here on purpose. `seq` only
+/// orders frames *within* one continuous run of one source, and a restarted
+/// driver begins again at 1. Keeping the previous run's high-water mark would
+/// make every frame of the new run look like a stale duplicate, so the source
+/// could not reclaim control until it had counted back up past the old value --
+/// several seconds of apparently dead input after each restart, getting worse
+/// every time. Same reasoning for the frame timestamp and the fps estimate:
+/// both describe a session that has ended.
+fn update_external_source_timeout(state: &mut InnerState) -> bool {
+    if state.control_source != ControlSource::External {
+        return false;
+    }
+    let timed_out = state
+        .external_last_frame_at
+        .is_none_or(|last| last.elapsed() > state.external_input_timeout);
+    if !timed_out {
+        return false;
+    }
+    // Targets are left exactly where they are: falling back to Manual must not
+    // snap the pose back.
+    state.control_source = ControlSource::Manual;
+    state.external_last_seq = None;
+    state.external_last_frame_at = None;
+    state.external_fps_ema = 0.0;
+    true
 }
 
 async fn apply_external_frame(state: &Arc<Mutex<InnerState>>, frame: ExternalInputFrame) {
@@ -2366,6 +2406,115 @@ mod tests {
         assert_eq!(state.external_last_seq, Some(5));
     }
 
+    /// Simulates a source whose last frame arrived `age` ago.
+    fn age_external_source(state: &mut InnerState, age: Duration) {
+        state.external_last_frame_at = Some(Instant::now() - age);
+    }
+
+    fn drive_external(state: &mut InnerState, seq: u64, motor_id: usize, coefficient: f32) {
+        let mut coefficients = null_coefficients();
+        coefficients[motor_id] = Some(coefficient);
+        apply_external_frame_locked(state, ExternalInputFrame { seq, coefficients });
+    }
+
+    #[test]
+    fn external_source_times_out_to_manual_without_moving_targets() {
+        let mut state = plain_state();
+        drive_external(&mut state, 1, 2, 1.0);
+        assert_eq!(state.control_source, ControlSource::External);
+        let held = state.target_applied.clone();
+
+        age_external_source(&mut state, Duration::from_millis(600));
+        assert!(update_external_source_timeout(&mut state));
+
+        assert_eq!(state.control_source, ControlSource::Manual);
+        // The whole point of falling back rather than resetting: the pose must
+        // stay where the external source left it.
+        assert_eq!(state.target_applied, held);
+    }
+
+    #[test]
+    fn external_source_reclaims_control_after_a_restart_resets_its_seq() {
+        let mut state = plain_state();
+        // A first run long enough to push the sequence counter well up.
+        for seq in 1..=300 {
+            drive_external(&mut state, seq, 2, 1.0);
+        }
+        assert_eq!(state.external_last_seq, Some(300));
+
+        age_external_source(&mut state, Duration::from_millis(600));
+        assert!(update_external_source_timeout(&mut state));
+        assert_eq!(state.control_source, ControlSource::Manual);
+
+        // The driver is restarted, so its sequence numbering begins again at 1.
+        // Those frames must not be mistaken for stale duplicates of the run
+        // that already ended.
+        drive_external(&mut state, 1, 2, 0.0);
+        assert_eq!(state.control_source, ControlSource::External);
+        assert_eq!(state.external_last_seq, Some(1));
+        approx(state.target_applied[2], 0.0);
+    }
+
+    #[test]
+    fn external_source_survives_ten_restarts_without_losing_a_frame() {
+        let mut state = plain_state();
+        for restart in 0..10 {
+            for seq in 1..=5 {
+                drive_external(&mut state, seq, 2, 1.0);
+                assert_eq!(
+                    state.control_source,
+                    ControlSource::External,
+                    "restart {restart} seq {seq} was dropped"
+                );
+            }
+            age_external_source(&mut state, Duration::from_millis(600));
+            assert!(update_external_source_timeout(&mut state));
+            assert_eq!(state.control_source, ControlSource::Manual);
+        }
+    }
+
+    #[test]
+    fn external_source_holds_through_frame_rate_jitter() {
+        let mut state = plain_state();
+        // 20..40Hz means gaps of 25..50ms, all far inside the 500ms timeout, so
+        // the source must never flap back to Manual mid-stream.
+        let gaps_ms = [25u64, 50, 33, 41, 27, 48, 31, 44, 26, 50];
+        for (index, gap) in gaps_ms.iter().enumerate() {
+            drive_external(&mut state, index as u64 + 1, 2, 1.0);
+            age_external_source(&mut state, Duration::from_millis(*gap));
+            assert!(
+                !update_external_source_timeout(&mut state),
+                "gap of {gap}ms should not have timed out"
+            );
+            assert_eq!(state.control_source, ControlSource::External);
+        }
+        assert!(state.external_fps_ema > 0.0);
+    }
+
+    #[test]
+    fn external_source_suppresses_idle_and_sequence_playback() {
+        let mut state = idle_ready_state();
+        // Reach Idle first, so the test shows External displacing an already
+        // running idle behavior rather than merely preventing entry.
+        update_idle_behavior(&mut state, false);
+        state.last_moving_at = Instant::now() - Duration::from_secs(10);
+        update_idle_behavior(&mut state, false);
+        assert_eq!(state.control_source, ControlSource::Idle);
+
+        drive_external(&mut state, 1, 2, 1.0);
+        assert_eq!(state.control_source, ControlSource::External);
+
+        // Idle must not resume while External holds the source, however long
+        // the channels sit still.
+        state.last_moving_at = Instant::now() - Duration::from_secs(10);
+        update_idle_behavior(&mut state, false);
+        assert_eq!(state.control_source, ControlSource::External);
+        assert!(state.blink_phase.is_none());
+
+        // Sequences are a Manual-source behavior, so manual writes are refused.
+        assert!(ensure_manual_writable(&state).is_err());
+    }
+
     #[test]
     fn external_frame_rejects_wrong_length() {
         let mut state = plain_state();
@@ -2730,6 +2879,13 @@ mod tests {
     #[test]
     fn blink_progresses_through_phases_and_returns_to_base_pose() {
         let mut state = idle_ready_state();
+        // plain_state() pins every test channel's neutral to its min, which
+        // makes negative norm degenerate (maps to 0 regardless of sign) --
+        // give channel 11 a real span around its neutral so the mirrored
+        // "closed" direction is actually observable below.
+        state.channels[11] = ch_with_id(11, -1.0, 1.0, 0.0);
+        state.target_applied[11] = 0.0;
+        state.current_applied[11] = 0.0;
         // Keep noise off the eyelid channels so only the blink moves them.
         state.idle_behavior.noise_channel_ids = vec![];
         update_idle_behavior(&mut state, false);
@@ -2750,7 +2906,7 @@ mod tests {
         advance_active_transition(&mut state);
         for &channel_id in &BLINK_EYELID_CHANNELS {
             let norm = state.channels[channel_id].applied_to_norm(state.target_applied[channel_id]);
-            approx(norm, BLINK_CLOSED_NORM);
+            approx(norm, BLINK_CLOSED_NORM * blink_close_direction(channel_id));
         }
         update_idle_behavior(&mut state, false);
         assert!(matches!(

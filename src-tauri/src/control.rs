@@ -823,13 +823,15 @@ impl ControlService {
         Ok(build_runtime_state(&state))
     }
 
-    /// Apply a preset scaled towards the `rest` preset's own norm vector
-    /// (or towards 0 per channel if there is no `rest` preset), instead of
-    /// scaling towards each channel's calibrated neutral (norm 0). The two
-    /// are not the same: `rest`'s per-channel norm values are themselves
-    /// mostly non-zero (see README's "表情预设系统"), so `intensity=0` lands
-    /// on the declared rest pose rather than each motor's independent
-    /// calibration midpoint.
+    /// Apply a preset scaled towards the neutral reference, so `intensity=0`
+    /// holds the neutral pose and `1.0` is the preset as authored.
+    ///
+    /// The reference is the `neutral` preset, whose norm is all zeros, i.e.
+    /// each channel's own calibrated neutral. This used to point at a `rest`
+    /// preset carrying a hand-authored pose with mostly non-zero norms, which
+    /// made `intensity=0` land on that pose instead of the calibration -- and
+    /// that pose turned out to be self-contradictory on hardware, so it was
+    /// removed rather than corrected.
     pub async fn apply_expression_preset_scaled(
         &self,
         preset_id: &str,
@@ -847,7 +849,7 @@ impl ControlService {
         let neutral_norm = state
             .expression_presets
             .iter()
-            .find(|preset| preset.id == "rest")
+            .find(|preset| preset.id == "neutral")
             .map(|preset| preset.norm.clone());
 
         let scaled_norm = scale_preset_norm(&preset.norm, neutral_norm.as_deref(), intensity);
@@ -1383,10 +1385,15 @@ fn compute_preset_target_applied(channels: &[MotorChannel], norm: &[f32]) -> Vec
         .collect()
 }
 
-/// Scales a preset's norm vector towards a neutral reference (the `rest`
-/// preset's own norm, or 0 per channel if there is no `rest` preset) by
-/// `intensity` -- the same semantics as `apply_expression_preset_scaled`,
-/// shared here so the sequence player can reuse it per step.
+/// Scales a preset's norm vector towards the neutral reference by `intensity`
+/// -- the same semantics as `apply_expression_preset_scaled`, shared here so
+/// the sequence player can reuse it per step.
+///
+/// The reference is the `neutral` preset's own norm, falling back to 0 per
+/// channel when it is absent. Those are the same thing as long as `neutral`
+/// stays all-zeros, which is what it means: norm 0 *is* each channel's
+/// calibrated neutral, so an intensity of 0 lands on the calibrated pose rather
+/// than on some authored approximation of it.
 fn scale_preset_norm(norm: &[f32], neutral_norm: Option<&[f32]>, intensity: f32) -> Vec<f32> {
     let intensity = intensity.clamp(0.0, 1.0);
     norm.iter()
@@ -1787,7 +1794,7 @@ async fn run_sequence_playback(
                 let neutral_norm = guard
                     .expression_presets
                     .iter()
-                    .find(|preset| preset.id == "rest")
+                    .find(|preset| preset.id == "neutral")
                     .map(|preset| preset.norm.clone());
                 let scaled_norm =
                     scale_preset_norm(&preset.norm, neutral_norm.as_deref(), step.intensity);

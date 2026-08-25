@@ -91,10 +91,7 @@ class Row:
         return "ok" if abs(self.deviation or 0.0) <= tolerance else "OFF"
 
 
-def build_rows(
-    config: dict[str, Any], preset_id: str, neutral_output: list[float | None]
-) -> list[Row]:
-    norm_to_applied = _load_norm_to_applied()
+def _preset_norm(config: dict[str, Any], preset_id: str) -> list[float]:
     presets = {
         preset.get("id"): preset for preset in config.get("expressionPresets", [])
     }
@@ -102,33 +99,58 @@ def build_rows(
         raise SystemExit(
             f"no preset {preset_id!r} in the config; found: {', '.join(sorted(presets))}"
         )
-    preset_norm = presets[preset_id]["norm"]
+    norm = presets[preset_id]["norm"]
     channels = config["channels"]
-    if len(preset_norm) != len(channels):
+    if len(norm) != len(channels):
         raise SystemExit(
-            f"preset {preset_id!r} has {len(preset_norm)} entries but the config has "
+            f"preset {preset_id!r} has {len(norm)} entries but the config has "
             f"{len(channels)} channels"
         )
+    return [float(value) for value in norm]
 
-    rows = []
-    for channel in channels:
-        channel_id = channel["id"]
+
+def neutral_targets(
+    config: dict[str, Any], preset_id: str = "rest"
+) -> list[float | None]:
+    """The unipolar coefficient each channel should sit at for `preset_id`.
+
+    This is the reference the driver's neutral output is judged against, and the
+    same reference the preview draws on its bars, so both read it from here
+    instead of each deriving it.
+    """
+    norm_to_applied = _load_norm_to_applied()
+    preset_norm = _preset_norm(config, preset_id)
+    targets: list[float | None] = []
+    for channel in config["channels"]:
         low, high = channel["minApplied"], channel["maxApplied"]
         span = high - low
-        norm = float(preset_norm[channel_id])
-        target = None
-        if span > 0:
-            applied = norm_to_applied(norm, low, high, channel["neutralApplied"])
-            target = (applied - low) / span
+        if span <= 0:
+            targets.append(None)
+            continue
+        applied = norm_to_applied(
+            preset_norm[channel["id"]], low, high, channel["neutralApplied"]
+        )
+        targets.append((applied - low) / span)
+    return targets
+
+
+def build_rows(
+    config: dict[str, Any], preset_id: str, neutral_output: list[float | None]
+) -> list[Row]:
+    preset_norm = _preset_norm(config, preset_id)
+    targets = neutral_targets(config, preset_id)
+    rows = []
+    for index, channel in enumerate(config["channels"]):
+        channel_id = channel["id"]
         rows.append(
             Row(
                 channel_id=channel_id,
                 name=channel.get("name", f"ch{channel_id}"),
                 enabled=bool(channel.get("enabled", True)),
-                rest_norm=norm,
-                target=target,
+                rest_norm=preset_norm[channel_id],
+                target=targets[index],
                 actual=neutral_output[channel_id],
-                span=span,
+                span=channel["maxApplied"] - channel["minApplied"],
             )
         )
     return rows

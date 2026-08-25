@@ -34,6 +34,9 @@ from pathlib import Path
 from typing import Any
 
 MOTOR_COUNT = 32
+# Matches tools/check_neutral.py's tolerance so the preview colours agree with
+# what that tool reports as off.
+NEUTRAL_TOLERANCE = 0.05
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6100
 SEND_HZ = 30
@@ -241,6 +244,14 @@ def parse_args() -> argparse.Namespace:
         "--camera", type=int, default=0, help="OpenCV camera index (default 0)"
     )
     parser.add_argument(
+        "--neutral-preset",
+        default="rest",
+        help=(
+            "Preset whose pose is drawn as the neutral reference on --preview's "
+            "bars (default rest). Pass an empty string to draw no reference."
+        ),
+    )
+    parser.add_argument(
         "--camera-config",
         type=Path,
         default=None,
@@ -281,11 +292,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def draw_preview(
-    surface, frame_bgr, landmarks, coefficients: list[float | None]
+    surface,
+    frame_bgr,
+    landmarks,
+    coefficients: list[float | None],
+    neutral: list[float | None] | None = None,
 ) -> None:
     """Renders the camera frame (mirrored to a pygame surface), landmark
     dots, and a bar chart of the mapped output coefficients. Imports pygame
     lazily so --preview is the only code path requiring a display.
+
+    `neutral` is the coefficient each channel should sit at for a neutral face,
+    drawn as a tick on every bar. Without it the bars only show "some value came
+    out"; with it you can see, per channel, whether a deliberate expression
+    moves the right way, how much of the channel's travel it actually uses, and
+    which other channels moved when they should not have.
     """
     import pygame
 
@@ -305,14 +326,29 @@ def draw_preview(
     font = pygame.font.SysFont("monospace", 12)
     for row, channel_id in enumerate(_MAPPED_CHANNEL_IDS):
         value = coefficients[channel_id]
+        reference = None if neutral is None else neutral[channel_id]
         y = 10 + row * 14
         pygame.draw.rect(surface, (60, 60, 60), (bar_x0, y, bar_w, 10))
+
+        delta = None
         if value is not None:
-            pygame.draw.rect(
-                surface, (80, 200, 120), (bar_x0, y, int(bar_w * value), 10)
+            if reference is not None:
+                delta = value - reference
+            on_target = delta is not None and abs(delta) <= NEUTRAL_TOLERANCE
+            colour = (80, 200, 120) if on_target or delta is None else (230, 170, 70)
+            pygame.draw.rect(surface, colour, (bar_x0, y, int(bar_w * value), 10))
+
+        if reference is not None:
+            tick_x = bar_x0 + int(bar_w * reference)
+            pygame.draw.line(
+                surface, (235, 235, 235), (tick_x, y - 2), (tick_x, y + 12)
             )
+
         label = font.render(f"{channel_id:02d}", True, (220, 220, 220))
         surface.blit(label, (bar_x0 - 24, y))
+        if delta is not None:
+            readout = font.render(f"{delta:+.2f}", True, (170, 180, 185))
+            surface.blit(readout, (bar_x0 + bar_w + 6, y))
 
 
 def open_frame_source(
@@ -419,12 +455,22 @@ def main() -> None:
     )
 
     preview_surface = None
+    neutral_reference: list[float | None] | None = None
     if args.preview:
         import pygame
 
         pygame.init()
+        if args.neutral_preset:
+            # The reference comes from check_neutral so there is one definition
+            # of "where neutral should be", rather than this file deriving it.
+            from check_neutral import DEFAULT_CONFIG, neutral_targets
+
+            neutral_reference = neutral_targets(
+                json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8")),
+                args.neutral_preset,
+            )
         preview_surface = pygame.display.set_mode(
-            (cam_width + 220, max(cam_height, 32 * 14))
+            (cam_width + 320, max(cam_height, 32 * 14))
         )
         pygame.display.set_caption("mediapipe_driver preview")
 
@@ -474,7 +520,9 @@ def main() -> None:
                     next_send_at = now + frame_interval
 
             if preview_surface is not None:
-                draw_preview(preview_surface, frame_bgr, landmarks, smoothed)
+                draw_preview(
+                    preview_surface, frame_bgr, landmarks, smoothed, neutral_reference
+                )
                 import pygame
 
                 pygame.display.flip()

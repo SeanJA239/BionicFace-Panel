@@ -29,6 +29,10 @@ from camera_capture import Camera, CameraError, CaptureConfig
 from facemesh import DEFAULT_MODEL, LandmarkExtractor
 
 TARGET_LOW, TARGET_HIGH = 0.60, 0.80
+# Mean grey inside the face box. Wide on purpose -- this is a "not obviously
+# wrong" band, not an optimum; the noise-floor measurement is what picks the
+# actual best exposure for a given lighting setup.
+EXPOSURE_LOW, EXPOSURE_HIGH = 90.0, 190.0
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 GREY = (150, 150, 150)
 GREEN = (110, 220, 140)
@@ -50,20 +54,31 @@ def draw_target_band(canvas: np.ndarray) -> None:
     cv2.line(canvas, (cx, cy - 8), (cx, cy + 8), GREY, 1)
 
 
-def draw_face(canvas: np.ndarray, points: np.ndarray) -> float:
-    """Draws landmarks plus bounding box; returns face height as a frame fraction."""
+def draw_face(
+    canvas: np.ndarray, points: np.ndarray
+) -> tuple[float, tuple[int, int, int, int]]:
+    """Draws landmarks plus bounding box.
+
+    Returns (face height as a fraction of frame height, the bounding box). The
+    box is what exposure should actually be judged on: whole-frame brightness
+    says nothing useful when the subject is lit and the background is not.
+    """
     for x, y in points:
         cv2.circle(canvas, (round(float(x)), round(float(y))), 1, GREEN, -1)
     x0, y0 = points.min(axis=0)
     x1, y1 = points.max(axis=0)
-    cv2.rectangle(
-        canvas,
-        (round(float(x0)), round(float(y0))),
-        (round(float(x1)), round(float(y1))),
-        GREEN,
-        1,
+    box = (round(float(x0)), round(float(y0)), round(float(x1)), round(float(y1)))
+    cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), GREEN, 1)
+    return float(y1 - y0) / canvas.shape[0], box
+
+
+def meter(grey: np.ndarray) -> tuple[float, float, float]:
+    """Mean brightness plus the share of pixels crushed to black or blown out."""
+    return (
+        float(grey.mean()),
+        float((grey > 250).mean() * 100),
+        float((grey < 5).mean() * 100),
     )
-    return float(y1 - y0) / canvas.shape[0]
 
 
 def draw_readout(
@@ -117,9 +132,9 @@ def main(argv: list[str] | None = None) -> int:
 
                 grey = cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
                 format_line = f"fps {fps:5.1f}   {canvas.shape[1]}x{canvas.shape[0]} {config.fourcc}"
+                mean_all, hi_all, lo_all = meter(grey)
                 exposure_line = (
-                    f"mean {grey.mean():5.1f}  clip hi {(grey > 250).mean() * 100:4.1f}%"
-                    f"  lo {(grey < 5).mean() * 100:4.1f}%"
+                    f"frame  mean {mean_all:5.1f}  hi {hi_all:4.1f}%  lo {lo_all:4.1f}%"
                 )
                 lines = [(format_line, GREY), (exposure_line, GREY)]
                 if extractor is not None:
@@ -127,13 +142,29 @@ def main(argv: list[str] | None = None) -> int:
                     if points is None:
                         lines.append(("NO FACE", RED))
                     else:
-                        share = draw_face(canvas, points)
+                        share, (bx0, by0, bx1, by1) = draw_face(canvas, points)
                         ok = TARGET_LOW <= share <= TARGET_HIGH
                         face_line = (
                             f"face {share * 100:4.1f}%  target {TARGET_LOW * 100:.0f}"
                             f"-{TARGET_HIGH * 100:.0f}%  {'OK' if ok else 'ADJUST'}"
                         )
                         lines.append((face_line, GREEN if ok else AMBER))
+                        crop = grey[max(by0, 0) : by1 + 1, max(bx0, 0) : bx1 + 1]
+                        if crop.size:
+                            mean_face, hi_face, lo_face = meter(crop)
+                            exposed = EXPOSURE_LOW <= mean_face <= EXPOSURE_HIGH
+                            verdict = (
+                                "OK"
+                                if exposed
+                                else "DARK"
+                                if mean_face < EXPOSURE_LOW
+                                else "BRIGHT"
+                            )
+                            face_meter = (
+                                f"face   mean {mean_face:5.1f}  hi {hi_face:4.1f}%"
+                                f"  lo {lo_face:4.1f}%  {verdict}"
+                            )
+                            lines.append((face_meter, GREEN if exposed else AMBER))
                 draw_readout(canvas, lines)
                 cv2.imshow(window, canvas)
 

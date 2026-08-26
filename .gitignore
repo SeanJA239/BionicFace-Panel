@@ -52,3 +52,6 @@ WHEELTEC C100 C70产品资料/
 
 # MediaPipe model asset (README documents the download command)
 tools/*.task
+
+# 采集数据集(图像 + JSONL,体积大且可重新采集)
+dataset/

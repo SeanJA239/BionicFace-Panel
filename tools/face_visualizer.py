@@ -75,12 +75,35 @@ LOST_COLOR = (230, 60, 60)
 # frontend topology view.
 # The subject's-right servos are mounted mirrored relative to the left ones, so
 # a symmetric expression arrives with opposite norm signs on the two sides.
-# Read off the hardware-authored emotion presets (see the same note in
-# tools/mediapipe_driver.py); channel 11 is independently confirmed by
-# control.rs's idle-blink direction table. Channels 12, 16 and 22 contradict
-# themselves across those presets and are deliberately left un-mirrored until
-# someone checks them on hardware.
-MIRRORED_CHANNELS = frozenset({0, 1, 11, 17, 18})
+# Read off the hardware-authored emotion presets: across the five that should be
+# left/right symmetric (喜悦/悲伤/愤怒/惊讶/恐惧 -- 困惑 and wink are deliberately
+# asymmetric), paired channels carry opposite signs in 26 of 29 cases where both
+# sides move. Channel 11 is independently confirmed by control.rs's idle-blink
+# direction table, and no pair has its mirroring already encoded in
+# minApplied/maxApplied -- every range is increasing.
+#
+# Mirroring is a property of the whole right-side bank, not of individual
+# channels, so this set starts from every right-side channel that has a left-side
+# mirror partner. Deciding it per channel by voting on preset signs is what
+# produced an earlier half-corrected set (0, 1, 11, 17, 18) that rendered
+# symmetric presets with the brows and mouth corners fixed while the cheeks,
+# nose, lower lids and lips stayed flipped.
+#
+# Channel 22 (lower_lip_right) is the one right-side partner deliberately left
+# OUT. 悲伤 and 愤怒 share an identical mouth block for channels 17-22, so they are
+# one authored observation, not two -- and once deduplicated the lower-lip pair is
+# a 1-1 tie. 恐惧 breaks it: 22=+1.00 with 21=+0.74, both large and same-signed,
+# and fear pulls the lower lip down on both sides, so negating 22 renders that
+# preset with the two halves of the lower lip moving apart. Every other pair here
+# is unanimous.
+#
+# Deliberately excluded, for structural reasons rather than lack of evidence:
+# midline channels with no mirror partner (8, 13, 15, 23, 24); the jaw, whose
+# open axis enters through abs() and whose 26/27 pair is coupled in Rust; and the
+# neck, which enters as the difference dev(30) - dev(31), a form that already
+# handles a mirrored pair (tilt is antisymmetric either way, so the presets
+# cannot tell us about neck mounting).
+MIRRORED_CHANNELS = frozenset({0, 1, 6, 7, 11, 12, 16, 17, 18})
 
 GROUP_COLORS = {
     "brow": (249, 115, 22),

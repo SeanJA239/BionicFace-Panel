@@ -105,6 +105,49 @@ LOST_COLOR = (230, 60, 60)
 # cannot tell us about neck mounting).
 MIRRORED_CHANNELS = frozenset({0, 1, 6, 7, 11, 12, 16, 17, 18})
 
+# Canonical subject-right <-> subject-left pairing of the paired facial features.
+# The mirrored set above is a subset of its right-hand members; the render scale
+# below shares one reference across each pair.
+MIRROR_PAIRS: tuple[tuple[int, int], ...] = (
+    (0, 2),
+    (1, 3),
+    (6, 5),
+    (7, 4),
+    (11, 9),
+    (12, 10),
+    (16, 14),
+    (17, 19),
+    (18, 20),
+    (22, 21),
+)
+
+
+def render_scales(channels: list[Channel]) -> list[float]:
+    """Degrees of travel each channel's drawn displacement is divided by.
+
+    control.rs normalises each side of neutral by that side's own travel. Drawing
+    in those units makes a channel with 5 deg of travel produce the same excursion
+    as one with 50, so a physically symmetric pose renders lopsided. 悲伤 is the clear case: channel 18 at norm -1.00 and channel 20 at
+    norm +0.50 are both 20 deg of real motion, and once 18's mirrored mount is
+    accounted for they are the same face motion -- yet they differ 2x in norm,
+    because 18 has 20 deg of upward travel where 20 has 40. The corners came out
+    at +0.10 and -0.25, which is the slant in the rendered mouth.
+
+    Dividing by degrees against a reference shared across the mirror pair makes
+    equal physical motion draw equal displacement. Unpaired channels (midline,
+    jaw, neck) keep their own largest travel, so their amplitude is unchanged.
+    """
+    own = [
+        max(c.neutral_applied - c.min_applied, c.max_applied - c.neutral_applied)
+        for c in channels
+    ]
+    scales = list(own)
+    for right, left in MIRROR_PAIRS:
+        shared = max(own[right], own[left])
+        scales[right] = scales[left] = shared
+    return [s if s > 1e-6 else 1.0 for s in scales]
+
+
 GROUP_COLORS = {
     "brow": (249, 115, 22),
     "tendon": (239, 68, 68),
@@ -135,25 +178,6 @@ class Channel:
     max_applied: float
     neutral_applied: float
     enabled: bool
-
-    def norm01(self, applied: float) -> float:
-        span = self.max_applied - self.min_applied
-        if span <= 1e-6:
-            return 0.5
-        return clamp((applied - self.min_applied) / span, 0.0, 1.0)
-
-    def neutral_norm01(self) -> float:
-        return self.norm01(self.neutral_applied)
-
-    def deviation(self, applied: float) -> float:
-        """Bipolar position around neutral: -1 = minApplied, 0 = neutral,
-        +1 = maxApplied, each side scaled by its own span."""
-        n = self.norm01(applied)
-        n0 = self.neutral_norm01()
-        span = (1.0 - n0) if n >= n0 else n0
-        if span <= 1e-6:
-            return 0.0
-        return clamp((n - n0) / span, -1.0, 1.0)
 
 
 def load_channels(config_path: Path) -> list[Channel]:
@@ -283,6 +307,7 @@ class FaceRenderer:
 
     def __init__(self, channels: list[Channel]) -> None:
         self.channels = channels
+        self.render_scales = render_scales(channels)
         self.show_nodes = True
         pygame.font.init()
         self.font = pygame.font.SysFont("monospace", 18)
@@ -290,13 +315,23 @@ class FaceRenderer:
         self.font_big = pygame.font.SysFont("monospace", 36, bold=True)
 
     def dev(self, channel_id: int, angles: list[float]) -> float:
-        """Deviation with the mirrored channels already flipped.
+        """Displacement from neutral in units of the channel's render scale,
+        with the mirrored channels already flipped.
 
-        Negating here, at the one place deviations enter the renderer, lets
-        every part below keep reading "+ = brow raised / lid closed / corner
-        up" regardless of which way that channel's servo is mounted.
+        Scaled by degrees rather than by Channel.deviation's per-side norm, so
+        that paired channels with unequal travel draw equal physical motion as
+        equal displacement -- see render_scales. Negating here, at the one place
+        displacements enter the renderer, lets every part below keep reading
+        "+ = brow raised / lid closed / corner up" regardless of which way that
+        channel's servo is mounted.
         """
-        value = self.channels[channel_id].deviation(angles[channel_id])
+        channel = self.channels[channel_id]
+        value = clamp(
+            (angles[channel_id] - channel.neutral_applied)
+            / self.render_scales[channel_id],
+            -1.0,
+            1.0,
+        )
         return -value if channel_id in MIRRORED_CHANNELS else value
 
     def tilt_radians(self, angles: list[float]) -> float:

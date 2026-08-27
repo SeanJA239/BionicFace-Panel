@@ -12,8 +12,8 @@ import type { MotorChannel } from "./tauri";
 //
 // This only has the wire-protocol `applied` degrees + each channel's own
 // min/max/neutral (like the Python renderer does) -- no access to Rust's
-// internal norm state -- so it reconstructs the same bipolar deviation
-// locally via Channel.deviation(), mirroring face_visualizer.py exactly.
+// internal norm state -- so it derives its own displacement from neutral,
+// scaled by degrees of travel; see renderScales.
 // Direction conventions (brow raised, lid closed, corner up, jaw open) are
 // the same assumptions as that Python renderer, and still unconfirmed except
 // for the mirroring below.
@@ -55,6 +55,48 @@ const FACE_CENTER: readonly [number, number] = [450, 380];
 const MIRRORED_CHANNELS: ReadonlySet<number> = new Set([
   0, 1, 6, 7, 11, 12, 16, 17, 18,
 ]);
+
+/** Canonical subject-right <-> subject-left pairing of the paired facial
+ * features. MIRRORED_CHANNELS is a subset of its right-hand members, and
+ * renderScales shares one reference across each pair. */
+const MIRROR_PAIRS: ReadonlyArray<readonly [number, number]> = [
+  [0, 2],
+  [1, 3],
+  [6, 5],
+  [7, 4],
+  [11, 9],
+  [12, 10],
+  [16, 14],
+  [17, 19],
+  [18, 20],
+  [22, 21],
+];
+
+/** Degrees of travel each channel's drawn displacement is divided by.
+ *
+ * control.rs normalises each side of neutral by that side's own travel. Drawing
+ * in those units makes a channel with 5deg of travel produce the same excursion
+ * as one with 50, so a physically symmetric pose renders lopsided.
+ * 悲伤 is the clear case: channel 18 at norm -1.00 and channel 20 at norm +0.50
+ * are both 20deg of real motion, and once 18's mirrored mount is accounted for
+ * they are the same face motion -- yet they differ 2x in norm, because 18 has
+ * 20deg of upward travel where 20 has 40. That drew the two lower-mouth corners
+ * 10px apart; against a shared reference they land on the same line.
+ *
+ * Unpaired channels (midline, jaw, neck) keep their own largest travel, so
+ * their amplitude is unchanged. */
+function renderScales(channels: MotorChannel[]): number[] {
+  const own = channels.map((c) =>
+    Math.max(c.neutralApplied - c.minApplied, c.maxApplied - c.neutralApplied),
+  );
+  const scales = [...own];
+  for (const [right, left] of MIRROR_PAIRS) {
+    const shared = Math.max(own[right], own[left]);
+    scales[right] = shared;
+    scales[left] = shared;
+  }
+  return scales.map((s) => (s > 1e-6 ? s : 1));
+}
 
 const LINE_COLOR = "#d7e2f0";
 const OUTLINE_COLOR = "#96a4ba";
@@ -102,22 +144,6 @@ function clamp(value: number, lower: number, upper: number): number {
 // Flat [0, 1] position within a channel's own limits -- screen-placement
 // bookkeeping only, unrelated to control.rs's bipolar norm space (this
 // component never sees that; it only has wire-protocol applied degrees).
-function norm01(channel: MotorChannel, applied: number): number {
-  const span = channel.maxApplied - channel.minApplied;
-  if (span <= 1e-6) return 0.5;
-  return clamp((applied - channel.minApplied) / span, 0, 1);
-}
-
-/** Bipolar position around neutral: -1 = minApplied, 0 = neutral,
- * +1 = maxApplied, each side scaled by its own span. */
-function deviation(channel: MotorChannel, applied: number): number {
-  const n = norm01(channel, applied);
-  const n0 = norm01(channel, channel.neutralApplied);
-  const span = n >= n0 ? 1.0 - n0 : n0;
-  if (span <= 1e-6) return 0;
-  return clamp((n - n0) / span, -1, 1);
-}
-
 type Point = readonly [number, number];
 
 /** Interpolates a smooth curve through all control points (endpoints
@@ -195,10 +221,14 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
   }
 
   const nodes: Record<number, Point> = {};
-  // Mirrored channels are flipped here, at the one place deviations enter the
-  // renderer, so everything below keeps reading "+ = raised / closed / up".
+  const scales = renderScales(channels);
+  // Displacement from neutral in units of the channel's render scale, so paired
+  // channels with unequal travel draw equal physical motion as equal
+  // displacement. Mirrored channels are flipped here, at the one place
+  // displacements enter the renderer, so everything below keeps reading
+  // "+ = raised / closed / up".
   const dev = (id: number) => {
-    const value = deviation(channels[id], applied[id]);
+    const value = clamp((applied[id] - channels[id].neutralApplied) / scales[id], -1, 1);
     return MIRRORED_CHANNELS.has(id) ? -value : value;
   };
 

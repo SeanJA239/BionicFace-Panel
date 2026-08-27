@@ -33,6 +33,8 @@ TARGET_LOW, TARGET_HIGH = 0.60, 0.80
 # wrong" band, not an optimum; the noise-floor measurement is what picks the
 # actual best exposure for a given lighting setup.
 EXPOSURE_LOW, EXPOSURE_HIGH = 90.0, 190.0
+# Backoff between attempts to reopen a dropped stream.
+RETRY_INTERVAL = 1.5
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 GREY = (150, 150, 150)
 GREEN = (110, 220, 140)
@@ -94,6 +96,39 @@ def draw_readout(
         cv2.putText(canvas, text, (8, 18 + 20 * i), FONT, 0.45, colour, 1, cv2.LINE_AA)
 
 
+def open_camera(config: CaptureConfig) -> Camera:
+    """Opens and locks a camera, ready to grab."""
+    camera = Camera(config)
+    camera.open()
+    camera.lock_params()
+    return camera
+
+
+def draw_lost_screen(size: tuple[int, int], detail: str, attempts: int) -> np.ndarray:
+    """Stand-in canvas while the stream is down, so the window stays alive.
+
+    A dropped stream used to take the whole tool down. That is the wrong
+    response for something a person is sitting in front of: the fix is almost
+    always to reopen the device, and that should not require going back to a
+    terminal and losing the framing you had.
+    """
+    width, height = size
+    canvas = np.full((height, width, 3), 22, dtype=np.uint8)
+    rows = [
+        ("CAMERA STREAM LOST", 0.9, RED),
+        (detail[:68], 0.42, GREY),
+        (f"reconnecting... attempt {attempts}", 0.5, AMBER),
+        ("r = retry now     q = quit", 0.5, GREY),
+        ("if the device node is gone, re-attach first, in PowerShell:", 0.4, GREY),
+        ("usbipd attach --wsl --busid=<BUSID>", 0.4, GREY),
+    ]
+    y = 56
+    for text, scale, colour in rows:
+        cv2.putText(canvas, text, (22, y), FONT, scale, colour, 1, cv2.LINE_AA)
+        y += int(30 * scale) + 24
+    return canvas
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, default=Path("tools/camera_params.json"))
@@ -112,71 +147,118 @@ def main(argv: list[str] | None = None) -> int:
         if args.device is not None:
             config.device = args.device
         extractor = None if args.no_landmarks else LandmarkExtractor(args.model)
-        with Camera(config) as camera:
-            camera.lock_params()
-            window = "BionicFace camera preview -- q to quit, s to snapshot"
-            cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-            deadline = time.monotonic() + args.seconds
-            stamps: list[float] = []
-            saved = 0
-            while time.monotonic() < deadline:
+        window = "BionicFace camera preview -- q quit, s snapshot, r restart"
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+        deadline = time.monotonic() + args.seconds
+        size = (config.width, config.height)
+        camera: Camera | None = None
+        lost_reason = ""
+        attempts = 0
+        next_retry = 0.0
+        stamps: list[float] = []
+        saved = 0
+
+        while time.monotonic() < deadline:
+            if camera is None:
+                if time.monotonic() >= next_retry:
+                    attempts += 1
+                    try:
+                        camera = open_camera(config)
+                        lost_reason, attempts, stamps = "", 0, []
+                        print("camera reopened")
+                    except CameraError as exc:
+                        lost_reason = str(exc)
+                        next_retry = time.monotonic() + RETRY_INTERVAL
+                if camera is None:
+                    cv2.imshow(window, draw_lost_screen(size, lost_reason, attempts))
+                    key = cv2.waitKey(80) & 0xFF
+                    if key in (ord("q"), 27):
+                        break
+                    if key == ord("r"):
+                        next_retry = 0.0
+                    continue
+
+            try:
                 frame = camera.grab()
-                canvas = frame.image.copy()
-                stamps = ([*stamps, frame.timestamp])[-30:]
-                fps = (
-                    (len(stamps) - 1) / (stamps[-1] - stamps[0])
-                    if len(stamps) > 1 and stamps[-1] > stamps[0]
-                    else 0.0
-                )
-                draw_target_band(canvas)
+            except CameraError as exc:
+                # A corrupt MJPEG burst or a select() timeout kills the stream
+                # without removing the device, and reopening usually fixes it.
+                # Taking the whole tool down is the wrong reflex for something
+                # a person is sitting in front of.
+                print(f"stream lost: {exc}")
+                lost_reason = str(exc)
+                camera.close()
+                camera = None
+                next_retry = time.monotonic() + RETRY_INTERVAL
+                continue
 
-                grey = cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
-                format_line = f"fps {fps:5.1f}   {canvas.shape[1]}x{canvas.shape[0]} {config.fourcc}"
-                mean_all, hi_all, lo_all = meter(grey)
-                exposure_line = (
-                    f"frame  mean {mean_all:5.1f}  hi {hi_all:4.1f}%  lo {lo_all:4.1f}%"
-                )
-                lines = [(format_line, GREY), (exposure_line, GREY)]
-                if extractor is not None:
-                    points = extractor.detect(frame.image)
-                    if points is None:
-                        lines.append(("NO FACE", RED))
-                    else:
-                        share, (bx0, by0, bx1, by1) = draw_face(canvas, points)
-                        ok = TARGET_LOW <= share <= TARGET_HIGH
-                        face_line = (
-                            f"face {share * 100:4.1f}%  target {TARGET_LOW * 100:.0f}"
-                            f"-{TARGET_HIGH * 100:.0f}%  {'OK' if ok else 'ADJUST'}"
+            canvas = frame.image.copy()
+            stamps = ([*stamps, frame.timestamp])[-30:]
+            fps = (
+                (len(stamps) - 1) / (stamps[-1] - stamps[0])
+                if len(stamps) > 1 and stamps[-1] > stamps[0]
+                else 0.0
+            )
+            draw_target_band(canvas)
+
+            grey = cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
+            format_line = (
+                f"fps {fps:5.1f}   {canvas.shape[1]}x{canvas.shape[0]} {config.fourcc}"
+            )
+            mean_all, hi_all, lo_all = meter(grey)
+            exposure_line = (
+                f"frame  mean {mean_all:5.1f}  hi {hi_all:4.1f}%  lo {lo_all:4.1f}%"
+            )
+            lines_out = [(format_line, GREY), (exposure_line, GREY)]
+            if extractor is not None:
+                points = extractor.detect(frame.image)
+                if points is None:
+                    lines_out.append(("NO FACE", RED))
+                else:
+                    share, (bx0, by0, bx1, by1) = draw_face(canvas, points)
+                    ok = TARGET_LOW <= share <= TARGET_HIGH
+                    face_line = (
+                        f"face {share * 100:4.1f}%  target {TARGET_LOW * 100:.0f}"
+                        f"-{TARGET_HIGH * 100:.0f}%  {'OK' if ok else 'ADJUST'}"
+                    )
+                    lines_out.append((face_line, GREEN if ok else AMBER))
+                    crop = grey[max(by0, 0) : by1 + 1, max(bx0, 0) : bx1 + 1]
+                    if crop.size:
+                        mean_face, hi_face, lo_face = meter(crop)
+                        exposed = EXPOSURE_LOW <= mean_face <= EXPOSURE_HIGH
+                        verdict = (
+                            "OK"
+                            if exposed
+                            else "DARK"
+                            if mean_face < EXPOSURE_LOW
+                            else "BRIGHT"
                         )
-                        lines.append((face_line, GREEN if ok else AMBER))
-                        crop = grey[max(by0, 0) : by1 + 1, max(bx0, 0) : bx1 + 1]
-                        if crop.size:
-                            mean_face, hi_face, lo_face = meter(crop)
-                            exposed = EXPOSURE_LOW <= mean_face <= EXPOSURE_HIGH
-                            verdict = (
-                                "OK"
-                                if exposed
-                                else "DARK"
-                                if mean_face < EXPOSURE_LOW
-                                else "BRIGHT"
-                            )
-                            face_meter = (
-                                f"face   mean {mean_face:5.1f}  hi {hi_face:4.1f}%"
-                                f"  lo {lo_face:4.1f}%  {verdict}"
-                            )
-                            lines.append((face_meter, GREEN if exposed else AMBER))
-                draw_readout(canvas, lines)
-                cv2.imshow(window, canvas)
+                        face_meter = (
+                            f"face   mean {mean_face:5.1f}  hi {hi_face:4.1f}%"
+                            f"  lo {lo_face:4.1f}%  {verdict}"
+                        )
+                        lines_out.append((face_meter, GREEN if exposed else AMBER))
+            draw_readout(canvas, lines_out)
+            cv2.imshow(window, canvas)
 
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), 27):
-                    break
-                if key == ord("s"):
-                    saved += 1
-                    path = args.config.parent / f"preview_snap_{saved:02d}.jpg"
-                    cv2.imwrite(str(path), frame.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
-                    print(f"saved {path}")
-            cv2.destroyAllWindows()
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            if key == ord("r"):
+                print("restarting camera on request")
+                camera.close()
+                camera = None
+                next_retry = 0.0
+                continue
+            if key == ord("s"):
+                saved += 1
+                path = args.config.parent / f"preview_snap_{saved:02d}.jpg"
+                cv2.imwrite(str(path), frame.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                print(f"saved {path}")
+
+        if camera is not None:
+            camera.close()
+        cv2.destroyAllWindows()
         if extractor is not None:
             extractor.close()
         return 0

@@ -373,15 +373,21 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     return p;
   };
 
-  // Each mouth corner is one physical point driven by TWO motors through a
-  // linkage (only the two motor pivots move; the corner is a coupler
-  // point): same-direction rotation moves the corner up/down, opposite
-  // rotation moves it in/out. Horizontal direction sign is an assumption,
-  // unconfirmed on hardware -- same caveat as jaw_open's direction above.
+  // Each mouth corner is ONE physical point driven by two motors through a
+  // linkage (only the motor pivots move; the corner is a coupler point).
+  //
+  // The two channels' documented positive directions are geometrically
+  // opposite -- +upper raises the corner, +lower pulls the lip down -- so their
+  // DIFFERENCE is the up/down common mode and their SUM the in/out
+  // differential. Checked against the presets: the difference puts 喜悦's
+  // corners up and 悲伤/愤怒/恐惧's down, left and right within 0.05 of each
+  // other; the sum gets every one of those backwards. The horizontal direction
+  // sign is still an assumption, unconfirmed on hardware -- same caveat as
+  // jaw_open's direction above.
   const mouthCorner = (upperCh: number, lowerCh: number, side: -1 | 1): Point => {
-    const vertical = ((dev(upperCh) + dev(lowerCh)) / 2) * CORNER_VERTICAL_RANGE_PX;
-    const horizontal = (dev(upperCh) - dev(lowerCh)) * CORNER_HORIZONTAL_RANGE_PX;
-    const p: Point = [side * 106.0 + side * horizontal, 56.0 + (upLift + lowDrop) / 2 + vertical];
+    const lift = ((dev(upperCh) - dev(lowerCh)) / 2) * CORNER_VERTICAL_RANGE_PX;
+    const outward = ((dev(upperCh) + dev(lowerCh)) / 2) * CORNER_HORIZONTAL_RANGE_PX;
+    const p: Point = [side * (106.0 + outward), 56.0 + (upLift + lowDrop) / 2 - lift];
     nodes[upperCh] = toScreen(...p);
     nodes[lowerCh] = toScreen(...p);
     return p;

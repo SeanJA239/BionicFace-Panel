@@ -300,6 +300,8 @@ class FaceRenderer:
     JAW_OPEN_RANGE_PX = 60.0
     EYE_GAZE_RANGE_PX = 12.0
     JAW_SHIFT_RANGE_PX = 14.0
+    CORNER_VERTICAL_RANGE_PX = 22.0
+    CORNER_HORIZONTAL_RANGE_PX = 18.0
 
     EYE_HALF_WIDTH = 34.0
     EYE_APERTURE_UPPER = 15.0
@@ -521,24 +523,52 @@ class FaceRenderer:
             nodes[ch] = to_screen(*p)
             return p
 
+        # Each mouth corner is ONE physical point driven by two motors through a
+        # linkage (only the motor pivots move; the corner is a coupler point),
+        # and it is where the upper and lower lip curves have to meet. Drawing
+        # 17/18 as two separate endpoints splayed the outline open at the
+        # corners.
+        #
+        # The two channels' documented positive directions are geometrically
+        # opposite -- +upper raises the corner, +lower pulls the lip down -- so
+        # their DIFFERENCE is the up/down common mode and their SUM the in/out
+        # differential. Checked against the presets: the difference puts 喜悦's
+        # corners up and 悲伤/愤怒/恐惧's down, left and right within 0.05 of each
+        # other; the sum gets every one of those backwards. The horizontal
+        # direction sign is still an assumption, unconfirmed on hardware --
+        # same caveat as jaw_open's direction.
+        def corner(upper_ch: int, lower_ch: int, side: float) -> Point:
+            up = self.dev(upper_ch, angles)
+            low = self.dev(lower_ch, angles)
+            lift = (up - low) / 2
+            outward = (up + low) / 2
+            p = (
+                side * (106.0 + outward * self.CORNER_HORIZONTAL_RANGE_PX),
+                56.0 + (up_lift + low_drop) / 2 - lift * self.CORNER_VERTICAL_RANGE_PX,
+            )
+            nodes[upper_ch] = to_screen(*p)
+            nodes[lower_ch] = to_screen(*p)
+            return p
+
+        right_corner = corner(17, 18, -1.0)
+        left_corner = corner(19, 20, 1.0)
+
         # Lips rest nearly closed (thin lens); jaw open and the individual
-        # lip/corner channels separate them.
-        # Upper lip through both corner_upper channels; + = corner/lip up.
+        # lip channels separate them. + = lip up on the upper, pulled down on
+        # the lower, which also follows the jaw sideways (channel 24).
         upper = [
-            pt(17, -105.0, 52.0 + up_lift, -24.0),
+            right_corner,
             pt(16, -52.0, 46.0 + up_lift, -14.0),
             pt(15, 0.0, 44.0 + up_lift, -12.0),
             pt(14, 52.0, 46.0 + up_lift, -14.0),
-            pt(19, 105.0, 52.0 + up_lift, -24.0),
+            left_corner,
         ]
-        # Lower lip through both corner_lower channels; + = pulled down.
-        # The lower half also follows the jaw sideways (channel 24).
         lower = [
-            pt(18, -108.0, 60.0 + low_drop, 20.0, jaw_x),
+            right_corner,
             pt(22, -52.0, 58.0 + low_drop, 16.0, jaw_x),
             pt(23, 0.0, 62.0 + low_drop, 18.0, jaw_x),
             pt(21, 52.0, 58.0 + low_drop, 16.0, jaw_x),
-            pt(20, 108.0, 60.0 + low_drop, 20.0, jaw_x),
+            left_corner,
         ]
 
         interior = [

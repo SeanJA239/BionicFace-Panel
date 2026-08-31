@@ -126,7 +126,12 @@ MOTOR_LIMITS = {
     # that is a mechanical dead zone -- the linkage stops moving. Max is pinned
     # at straight-ahead so sampled commands never land in the dead zone; the
     # channel is one-sided, gaze deviates rightward only.
-    8: (75, 110),  # 90-zero
+    8: (75, 140),  # 90-zero  TEMPORARY measurement window -- see below
+    # TEMPORARY 2026-08-29: widened above 110 to re-measure both sides of
+    # straight-ahead with the jog tool; the two hardware sessions contradict on
+    # which side is the dead zone. Do NOT run the mediapipe driver while this is
+    # in place (its ch8 bias assumes neutral == max). Restore to measured values
+    # right after.
     9: (35, 150),
     10: (60, 175),
     11: (45, 110),

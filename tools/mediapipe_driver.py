@@ -1,10 +1,11 @@
 """MediaPipe Face Landmarker -> BionicFace external coefficient stream.
 
 Independent process: reads the default webcam, runs MediaPipe's Face
-Landmarker (tasks API, blendshapes enabled), maps blendshape scores to the
-32 motor channels through a data-driven table, smooths each output with a
-One Euro Filter, and sends coefficient frames at a fixed 30Hz to the Rust
-ControlService's external input port (task 4, default 127.0.0.1:6100).
+Landmarker (tasks API, blendshapes and transformation matrix enabled), maps
+blendshape scores to the 32 motor channels through a data-driven table and head
+pose to the two neck channels, smooths each output with a One Euro Filter, and
+sends coefficient frames at a fixed 30Hz to the Rust ControlService's external
+input port (task 4, default 127.0.0.1:6100).
 
 This process never talks to the Raspberry Pi or bypasses ControlService --
 it only ever writes to the external-input UDP port, which itself goes
@@ -102,11 +103,21 @@ SEND_HZ = 30
 # them, meaning "not driven by this frame" per control.rs's external-input
 # format) -- 26/27 are deliberately excluded so Rust's own jaw coupling
 # drives them from channel 25, and channels with no obvious blendshape
-# analogue (cheek/nose tendons, jaw_horizontal fine detail, neck -- there is
-# no head-pose blendshape) are left for a future mapping pass.
+# analogue (cheek/nose tendons, jaw_horizontal fine detail) are left for a
+# future mapping pass. The neck (30/31) is driven too, but not from here:
+# there is no head-pose blendshape, so it comes from the facial transformation
+# matrix instead -- see neck_coefficients.
 BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
-    # Eyebrows (0-3). browInnerUp lifts both inner brows together; browDown
-    # is per-side.
+    # Eyebrows (0-3). browInnerUp lifts both inner brows together; browDown and
+    # browOuterUp are per-side.
+    #
+    # The outer brows used to map browDown only, so they could travel downward
+    # and never up -- half of why a raised eyebrow produced nothing. On a static
+    # neutral face browOuterUpLeft/Right are in fact the two highest-reading of
+    # all 52 blendshapes (0.361 and 0.147), so the signal was there and was being
+    # discarded. They are the only per-side brow *raise* MediaPipe offers:
+    # browInnerUp is a single shared coefficient, so the inner brows cannot move
+    # asymmetrically at all and a one-sided raise has to come from these two.
     #
     # Channel 0's calibrated neutral sits exactly at its maxApplied, so it can
     # only move downward. Once mirrored, that is the raising direction, and
@@ -119,7 +130,13 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     # lowers the brows, leaves channel 0 at 0.00 and does the lowering with the
     # outer brow channels instead.
     0: [("browInnerUp", -1.0, 1.0), ("browDownRight", 1.0, 0.0)],  # eyebrow_right_inner
-    1: [("browDownRight", 0.375, 0.625)],  # eyebrow_right_outer
+    # Channel 1 is mirrored, so a rising coefficient lowers the brow on the face
+    # and browOuterUpRight has to push the other way -- towards 0, across the
+    # channel's whole 0.625 of downward coefficient travel.
+    1: [
+        ("browDownRight", 0.375, 0.625),
+        ("browOuterUpRight", -0.625, 0.0),
+    ],  # eyebrow_right_outer
     # Channel 2 rests at coefficient 0.133, so brow-down has only 15% of the
     # travel that brow-up does. Not a mapping fault -- the neutral is calibrated
     # near the bottom of this channel's range.
@@ -127,7 +144,11 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
         ("browInnerUp", 0.867, 0.133),
         ("browDownLeft", -0.133, 0.0),
     ],  # eyebrow_left_inner
-    3: [("browDownLeft", -0.55, 0.55)],  # eyebrow_left_outer
+    # Channel 3 is not mirrored, so raising the brow raises the coefficient.
+    3: [
+        ("browDownLeft", -0.55, 0.55),
+        ("browOuterUpLeft", 0.45, 0.0),
+    ],  # eyebrow_left_outer
     # Eyes (8-13). 8/13 are each a *single shared* mechanism driving both
     # eyeballs (see config.py's MOTOR_MAP comments), so both eyes' gaze
     # blendshapes are averaged into one signed value around the neutral.
@@ -201,13 +222,120 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     25: [("jawOpen", 0.471, 0.529)],  # jaw_right_upper (main jaw-open axis)
 }
 
-# Every mapped channel gets its own One Euro Filter instance; channels not
-# in BLENDSHAPE_MAP never appear here and always send null.
 _MAPPED_CHANNEL_IDS = tuple(sorted(BLENDSHAPE_MAP.keys()))
+
+# --- Head pose -> neck ------------------------------------------------------
+#
+# MediaPipe has no head-pose blendshape, so the neck is driven from the facial
+# transformation matrix instead of BLENDSHAPE_MAP.
+#
+# The mechanism sets a hard ceiling on what is even worth extracting: the neck
+# is two servos, `neck_left` and `neck_right`, mounted on opposite sides. They
+# reach exactly two of the head's three rotational degrees of freedom -- moving
+# together to nod (pitch) and oppositely to tilt (roll). Yaw (shaking the head)
+# would need a third servo on a vertical axis, so it is unreachable and is not
+# mapped at all, however well it can be detected.
+NECK_CHANNEL_IDS = (30, 31)
+# Both channels run 75..105 degrees with neutral at 90, so each rests at
+# coefficient 0.5 with 0.5 of travel either way. Pitch and roll draw on that
+# same budget, so each mode gets half: full nod plus full tilt then lands
+# exactly on the limit rather than relying on the clamp, which is the same rule
+# the blendshape weights above follow. Regenerate these if the neck limits move.
+NECK_NEUTRAL = 0.5
+NECK_MODE_BUDGET = 0.25
+# Frames averaged for the automatic baseline; ~1s at SEND_HZ.
+NECK_BASELINE_FRAMES = 30
+
+# Everything this process can drive. Each gets its own One Euro Filter and its
+# own preview row; channels outside this set always send null.
+_DRIVEN_CHANNEL_IDS = tuple(sorted({*_MAPPED_CHANNEL_IDS, *NECK_CHANNEL_IDS}))
 
 
 def clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def clamp_signed(value: float) -> float:
+    return max(-1.0, min(1.0, value))
+
+
+def neck_coefficients(
+    pitch_deg: float,
+    roll_deg: float,
+    pitch_range_deg: float,
+    roll_range_deg: float,
+) -> tuple[float, float]:
+    """Baseline-corrected head pitch/roll in degrees -> (ch30, ch31).
+
+    `*_range_deg` is the head rotation that maps to that mode's full travel;
+    beyond it the output saturates. The compression matters: a person's nod or
+    tilt runs well past the mechanism's +-15 degrees, so feeding raw angles in
+    would park both channels on their limits for all but the smallest movements.
+
+    Which physical tilt a positive differential actually produces is unverified,
+    the same caveat as the rest of this file's direction signs. face_visualizer
+    draws the pair as dev(30) - dev(31), so the preview and the twin face agree
+    with each other whether or not they agree with the hardware.
+    """
+    common = clamp_signed(pitch_deg / pitch_range_deg) * NECK_MODE_BUDGET
+    differential = clamp_signed(roll_deg / roll_range_deg) * NECK_MODE_BUDGET
+    return (
+        clamp01(NECK_NEUTRAL + common + differential),
+        clamp01(NECK_NEUTRAL + common - differential),
+    )
+
+
+def head_pose_degrees(matrix: Any, cv2: Any) -> tuple[float, float, float]:
+    """(pitch, yaw, roll) in degrees from MediaPipe's 4x4 transformation matrix.
+
+    The matrix maps a canonical face model onto the detected face, so its
+    upper-left 3x3 is the head's rotation; RQDecomp3x3 gives that rotation's
+    Euler angles directly in degrees.
+    """
+    import numpy as np
+
+    rotation = np.asarray(matrix, dtype=float)[:3, :3]
+    pitch, yaw, roll = cv2.RQDecomp3x3(rotation)[0]
+    return float(pitch), float(yaw), float(roll)
+
+
+class HeadPoseBaseline:
+    """The head pose that counts as level, subtracted from every reading.
+
+    Head pose carries a per-subject and per-placement offset -- a static print
+    measured 4.35 degrees of pitch, not 0 -- so raw angles would hold the neck
+    off-centre for as long as the driver ran. Averaging the opening frames is
+    enough precision because the pose is stable to well under a tenth of a
+    degree on a still subject; the operator just has to hold level while it
+    fills. Until it does, `observe` returns None and the caller should leave the
+    neck at neutral rather than drive it from an unknown zero.
+    """
+
+    def __init__(self, frames: int, fixed: tuple[float, float] | None = None) -> None:
+        self._frames = frames
+        self._pitch_sum = 0.0
+        self._roll_sum = 0.0
+        self._count = 0
+        self._value = fixed
+        self._fixed = fixed is not None
+
+    @property
+    def value(self) -> tuple[float, float] | None:
+        return self._value
+
+    def observe(self, pitch: float, roll: float) -> tuple[float, float] | None:
+        """Feeds one reading in and returns the baseline, or None if not ready."""
+        if self._fixed or self._value is not None:
+            return self._value
+        self._pitch_sum += pitch
+        self._roll_sum += roll
+        self._count += 1
+        if self._count >= self._frames:
+            self._value = (
+                self._pitch_sum / self._count,
+                self._roll_sum / self._count,
+            )
+        return self._value
 
 
 def apply_blendshape_map(scores: dict[str, float]) -> list[float | None]:
@@ -268,7 +396,7 @@ class OneEuroFilter:
 
 @dataclass
 class FilterBank:
-    """One OneEuroFilter per mapped channel, all sharing the same tuning."""
+    """One OneEuroFilter per driven channel, all sharing the same tuning."""
 
     min_cutoff: float
     beta: float
@@ -279,7 +407,7 @@ class FilterBank:
         self, coefficients: list[float | None], timestamp: float
     ) -> list[float | None]:
         smoothed = list(coefficients)
-        for channel_id in _MAPPED_CHANNEL_IDS:
+        for channel_id in _DRIVEN_CHANNEL_IDS:
             value = coefficients[channel_id]
             if value is None:
                 continue
@@ -297,6 +425,19 @@ def build_frame(seq: int, coefficients: list[float | None]) -> dict[str, Any]:
         "timestampNs": time.time_ns(),
         "coefficients": coefficients,
     }
+
+
+def neck_baseline_arg(value: str) -> tuple[float, float]:
+    """Parses a `PITCH,ROLL` degree pair for --neck-baseline."""
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("expected PITCH,ROLL in degrees")
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected two numbers, got {value!r}"
+        ) from None
 
 
 def parse_args() -> argparse.Namespace:
@@ -359,6 +500,44 @@ def parse_args() -> argparse.Namespace:
         help="One Euro Filter d_cutoff (default 1.0)",
     )
     parser.add_argument(
+        "--no-neck",
+        action="store_true",
+        help=(
+            "Leave the neck channels undriven. The head pose is still decoded "
+            "and reported; this only stops it reaching channels 30/31."
+        ),
+    )
+    parser.add_argument(
+        "--neck-pitch-range",
+        type=float,
+        default=20.0,
+        help=(
+            "Head pitch in degrees mapping to the neck's full nod travel "
+            "(default 20.0). Raise it to make nodding less sensitive."
+        ),
+    )
+    parser.add_argument(
+        "--neck-roll-range",
+        type=float,
+        default=25.0,
+        help=(
+            "Head roll in degrees mapping to the neck's full tilt travel "
+            "(default 25.0). Raise it to make tilting less sensitive."
+        ),
+    )
+    parser.add_argument(
+        "--neck-baseline",
+        type=neck_baseline_arg,
+        default=None,
+        metavar="PITCH,ROLL",
+        help=(
+            "Head pose in degrees to treat as level, skipping the automatic "
+            f"calibration. Without it the first {NECK_BASELINE_FRAMES} frames "
+            "with a face are averaged, so hold the head level and still while "
+            "the driver starts."
+        ),
+    )
+    parser.add_argument(
         "--preview",
         action="store_true",
         help="Show a debug window (camera + landmarks + bars)",
@@ -399,7 +578,7 @@ def draw_preview(
     bar_x0 = width + 10
     bar_w = 200
     font = pygame.font.SysFont("monospace", 12)
-    for row, channel_id in enumerate(_MAPPED_CHANNEL_IDS):
+    for row, channel_id in enumerate(_DRIVEN_CHANNEL_IDS):
         value = coefficients[channel_id]
         reference = None if neutral is None else neutral[channel_id]
         y = 10 + row * 14
@@ -493,6 +672,13 @@ def open_frame_source(
 def main() -> None:
     args = parse_args()
 
+    for flag, value in (
+        ("--neck-pitch-range", args.neck_pitch_range),
+        ("--neck-roll-range", args.neck_roll_range),
+    ):
+        if value <= 0:
+            raise SystemExit(f"{flag} must be positive, got {value}")
+
     # Heavy/optional dependencies are imported here, not at module scope, so
     # apply_blendshape_map/OneEuroFilter/build_frame stay importable and
     # unit-testable on a machine without mediapipe/opencv/pygame installed.
@@ -513,10 +699,12 @@ def main() -> None:
             "Download face_landmarker.task per README.md's MediaPipe section."
         )
 
+    # The transformation matrix is the only head-pose source MediaPipe offers;
+    # without it channels 30/31 have nothing to follow.
     options = face_landmarker_options_cls(
         base_options=base_options_cls(model_asset_path=str(args.model)),
         output_face_blendshapes=True,
-        output_facial_transformation_matrixes=False,
+        output_facial_transformation_matrixes=True,
         running_mode=running_mode.VIDEO,
         num_faces=1,
     )
@@ -528,6 +716,17 @@ def main() -> None:
     filter_bank = FilterBank(
         min_cutoff=args.min_cutoff, beta=args.beta, d_cutoff=args.d_cutoff
     )
+
+    neck_baseline = HeadPoseBaseline(NECK_BASELINE_FRAMES, args.neck_baseline)
+    if not args.no_neck:
+        if args.neck_baseline is None:
+            print(
+                f"neck: averaging the first {NECK_BASELINE_FRAMES} frames with a "
+                f"face for the level baseline -- hold still and level"
+            )
+        else:
+            pitch, roll = args.neck_baseline
+            print(f"neck: baseline fixed at pitch {pitch:+.2f} roll {roll:+.2f} deg")
 
     preview_surface = None
     neutral_reference: list[float | None] | None = None
@@ -582,6 +781,33 @@ def main() -> None:
                 landmarks = result.face_landmarks[0]
 
             raw_coefficients = apply_blendshape_map(scores)
+
+            if not args.no_neck:
+                # No face, or no baseline yet, means no trustworthy zero, so
+                # rest at neutral rather than driving off an unknown reference --
+                # which is also what the blendshape channels do on empty scores.
+                neck = (NECK_NEUTRAL, NECK_NEUTRAL)
+                if result.facial_transformation_matrixes:
+                    pitch, _yaw, roll = head_pose_degrees(
+                        result.facial_transformation_matrixes[0], cv2
+                    )
+                    had_baseline = neck_baseline.value is not None
+                    baseline = neck_baseline.observe(pitch, roll)
+                    if baseline is not None:
+                        if not had_baseline:
+                            print(
+                                f"neck: baseline captured at pitch "
+                                f"{baseline[0]:+.2f} roll {baseline[1]:+.2f} deg"
+                            )
+                        neck = neck_coefficients(
+                            pitch - baseline[0],
+                            roll - baseline[1],
+                            args.neck_pitch_range,
+                            args.neck_roll_range,
+                        )
+                left, right = NECK_CHANNEL_IDS
+                raw_coefficients[left], raw_coefficients[right] = neck
+
             smoothed = filter_bank.apply(raw_coefficients, time.monotonic())
 
             now = time.monotonic()

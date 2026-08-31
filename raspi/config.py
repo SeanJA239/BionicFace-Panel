@@ -121,7 +121,12 @@ MOTOR_LIMITS = {
     5: (75, 105),  # 90-zero tendon
     6: (75, 105),  # 90-zero tendon
     7: (75, 135),  # 90-zero tendon
-    8: (75, 135),  # 90-zero
+    # Measured on hardware 2026-08-29 (docs/hardware/CHANNEL_VERIFICATION.md):
+    # eyes look straight ahead at applied 110 (logical 105), and travel above
+    # that is a mechanical dead zone -- the linkage stops moving. Max is pinned
+    # at straight-ahead so sampled commands never land in the dead zone; the
+    # channel is one-sided, gaze deviates rightward only.
+    8: (75, 110),  # 90-zero
     9: (35, 150),
     10: (60, 175),
     11: (45, 110),
@@ -172,7 +177,7 @@ MOTOR_INITIAL_APPLIED = {
     5: 90.0,
     6: 90.0,
     7: 90.0,
-    8: 90.0,
+    8: 110.0,
     9: 118.0,
     10: 108.5,
     11: 89.0,

@@ -153,11 +153,15 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     # Eyes (8-13). 8/13 are each a *single shared* mechanism driving both
     # eyeballs (see config.py's MOTOR_MAP comments), so both eyes' gaze
     # blendshapes are averaged into one signed value around the neutral.
-    8: [  # eye_horizontal (shared gaze X); out has 3x the travel of in
-        ("eyeLookOutRight", 0.375, 0.25),
-        ("eyeLookInRight", -0.125, 0.0),
-        ("eyeLookInLeft", 0.375, 0.0),
-        ("eyeLookOutLeft", -0.125, 0.0),
+    # eye_horizontal: hardware-measured 2026-08-29 (see
+    # docs/hardware/CHANNEL_VERIFICATION.md) -- straight ahead is applied 110
+    # and everything above is a mechanical dead zone, so neutral == max
+    # (coefficient 1.0) and gaze deviates ONE way only. Per the pre-existing
+    # (still unconfirmed) direction assumption that lower applied = subject
+    # looks left, only the look-left pair is mapped; look-right is unreachable.
+    8: [  # eye_horizontal (shared gaze X)
+        ("eyeLookInRight", -0.5, 1.0),
+        ("eyeLookOutLeft", -0.5, 0.0),
     ],
     13: [  # eye_vertical (shared gaze Y)
         ("eyeLookUpRight", 0.143, 0.714),

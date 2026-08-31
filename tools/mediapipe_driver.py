@@ -156,12 +156,12 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     # eye_horizontal: hardware-measured 2026-08-29 (see
     # docs/hardware/CHANNEL_VERIFICATION.md) -- straight ahead is applied 110
     # and everything above is a mechanical dead zone, so neutral == max
-    # (coefficient 1.0) and gaze deviates ONE way only. Per the pre-existing
-    # (still unconfirmed) direction assumption that lower applied = subject
-    # looks left, only the look-left pair is mapped; look-right is unreachable.
+    # (coefficient 1.0) and gaze deviates ONE way only: lower applied moves the
+    # gaze to the SUBJECT'S RIGHT (the observer's left). Only the look-right
+    # pair is mapped; looking left is mechanically unreachable.
     8: [  # eye_horizontal (shared gaze X)
-        ("eyeLookInRight", -0.5, 1.0),
-        ("eyeLookOutLeft", -0.5, 0.0),
+        ("eyeLookOutRight", -0.5, 1.0),
+        ("eyeLookInLeft", -0.5, 0.0),
     ],
     13: [  # eye_vertical (shared gaze Y)
         ("eyeLookUpRight", 0.143, 0.714),

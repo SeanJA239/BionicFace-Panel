@@ -1,9 +1,10 @@
 """MediaPipe Face Landmarker -> BionicFace external coefficient stream.
 
 Independent process: reads the default webcam, runs MediaPipe's Face
-Landmarker (tasks API, blendshapes and transformation matrix enabled), maps
-blendshape scores to the 32 motor channels through a data-driven table and head
-pose to the two neck channels, smooths each output with a One Euro Filter, and
+Landmarker (tasks API, blendshapes and transformation matrix enabled), rebases
+the blendshape scores against a per-subject rest baseline, maps them to the 32
+motor channels through a data-driven table and head pose to the two neck
+channels, smooths each output with a One Euro Filter, and
 sends coefficient frames at a fixed 30Hz to the Rust ControlService's external
 input port (task 4, default 127.0.0.1:6100).
 
@@ -245,6 +246,8 @@ NECK_NEUTRAL = 0.5
 NECK_MODE_BUDGET = 0.25
 # Frames averaged for the automatic baseline; ~1s at SEND_HZ.
 NECK_BASELINE_FRAMES = 30
+# Same idea for the blendshape rest baseline (see BlendshapeBaseline).
+BLENDSHAPE_BASELINE_FRAMES = 30
 
 # Everything this process can drive. Each gets its own One Euro Filter and its
 # own preview row; channels outside this set always send null.
@@ -336,6 +339,101 @@ class HeadPoseBaseline:
                 self._roll_sum / self._count,
             )
         return self._value
+
+
+class BlendshapeBaseline:
+    """The blendshape vector that counts as a neutral face, rebased out of
+    every reading.
+
+    Every mapping entry's bias assumes a neutral face scores ~0 on its
+    blendshape, but resting scores are per-subject: the neutral A4 print reads
+    browOuterUpLeft 0.361 against browOuterUpRight 0.147 -- 2.5x apart on one
+    still face -- so without this the outer brows sit visibly raised and
+    lopsided the moment the driver takes over. Averaging the opening frames is
+    enough precision because scores on a still subject wobble by only sigma
+    0.02-0.04.
+
+    `rebase` maps each score through (score - rest) / (1 - rest), clamped to
+    [0, 1]. Three deliberate semantics: rest lands on 0, so every channel falls
+    back to its calibrated-neutral bias; a full activation still reaches 1, so
+    the subtraction costs no travel; and a reading below rest -- "more relaxed
+    than the calibration pose" -- clips to 0, because the map assigns it no
+    meaning.
+    """
+
+    def __init__(self, frames: int, fixed: dict[str, float] | None = None) -> None:
+        self._frames = frames
+        self._sums: dict[str, float] = {}
+        self._count = 0
+        self._value = dict(fixed) if fixed is not None else None
+        self._names_checked = False
+
+    @property
+    def value(self) -> dict[str, float] | None:
+        return self._value
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        return self._count, self._frames
+
+    def _check_names(self, scores: dict[str, float]) -> None:
+        # A loaded baseline naming different blendshapes than the model outputs
+        # would silently rebase some scores and leave others raw; refuse loudly
+        # instead. Checked against the first real frame because the model's
+        # name set is only known once it has produced one.
+        if self._names_checked:
+            return
+        missing = sorted(set(scores) - set(self._value or {}))
+        unknown = sorted(set(self._value or {}) - set(scores))
+        if missing or unknown:
+            raise SystemExit(
+                "blendshape baseline does not match the model's outputs -- "
+                f"absent from baseline: {missing or 'none'}; "
+                f"unknown to the model: {unknown or 'none'}"
+            )
+        self._names_checked = True
+
+    def observe(self, scores: dict[str, float]) -> dict[str, float] | None:
+        """Feeds one frame's scores in and returns the baseline, or None while
+        still collecting."""
+        if self._value is not None:
+            self._check_names(scores)
+            return self._value
+        for name, score in scores.items():
+            self._sums[name] = self._sums.get(name, 0.0) + score
+        self._count += 1
+        if self._count >= self._frames:
+            self._value = {
+                name: total / self._count for name, total in self._sums.items()
+            }
+        return self._value
+
+    def rebase(self, scores: dict[str, float]) -> dict[str, float]:
+        # Callers only get here after observe() returned a baseline.
+        rest_vector = self._value or {}
+        rebased: dict[str, float] = {}
+        for name, score in scores.items():
+            rest = rest_vector.get(name, 0.0)
+            # A rest score at 1.0 leaves no travel to rescale into; the max()
+            # guard degrades that pathological case to "anything above rest is
+            # fully on" instead of dividing by zero.
+            rebased[name] = clamp01((score - rest) / max(1.0 - rest, 1e-6))
+        return rebased
+
+    def top_entries(self, count: int = 5) -> list[tuple[str, float]]:
+        ranked = sorted((self._value or {}).items(), key=lambda item: -item[1])
+        return ranked[:count]
+
+
+def load_blendshape_baseline(path: Path) -> dict[str, float]:
+    """Reads a {blendshape_name: rest_score} JSON written by --baseline-save."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not all(
+        isinstance(name, str) and isinstance(value, (int, float))
+        for name, value in data.items()
+    ):
+        raise SystemExit(f"{path} is not a {{blendshape_name: rest_score}} object")
+    return {name: float(value) for name, value in data.items()}
 
 
 def apply_blendshape_map(scores: dict[str, float]) -> list[float | None]:
@@ -538,6 +636,46 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--baseline-frames",
+        type=int,
+        default=BLENDSHAPE_BASELINE_FRAMES,
+        help=(
+            "Frames with a face averaged into the blendshape rest baseline "
+            f"(default {BLENDSHAPE_BASELINE_FRAMES}); hold a neutral expression "
+            "while it fills. Mapped channels rest at their calibrated neutral "
+            "until it completes."
+        ),
+    )
+    parser.add_argument(
+        "--no-blendshape-baseline",
+        action="store_true",
+        help=(
+            "Feed raw blendshape scores to the map without rest-baseline "
+            "rebasing. Per-subject resting bias then lands on the channels: "
+            "the outer brows sit off-neutral and lopsided on a face whose "
+            "resting browOuterUp reads high."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-save",
+        type=Path,
+        default=None,
+        help=(
+            "Write the captured rest baseline to this JSON so a later run on "
+            "the same subject can --baseline-load it. Only written when the "
+            "baseline is captured this run, not when it was loaded."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-load",
+        type=Path,
+        default=None,
+        help=(
+            "Skip capture and use this rest baseline. Refused if its name set "
+            "differs from what the model outputs."
+        ),
+    )
+    parser.add_argument(
         "--preview",
         action="store_true",
         help="Show a debug window (camera + landmarks + bars)",
@@ -551,6 +689,7 @@ def draw_preview(
     landmarks,
     coefficients: list[float | None],
     neutral: list[float | None] | None = None,
+    status: str | None = None,
 ) -> None:
     """Renders the camera frame (mirrored to a pygame surface), landmark
     dots, and a bar chart of the mapped output coefficients. Imports pygame
@@ -560,7 +699,8 @@ def draw_preview(
     drawn as a tick on every bar. Without it the bars only show "some value came
     out"; with it you can see, per channel, whether a deliberate expression
     moves the right way, how much of the channel's travel it actually uses, and
-    which other channels moved when they should not have.
+    which other channels moved when they should not have. `status` is a
+    transient banner (e.g. baseline-calibration progress) drawn over the frame.
     """
     import pygame
 
@@ -569,6 +709,10 @@ def draw_preview(
     rgb = frame_bgr[:, :, ::-1]
     cam_surface = pygame.surfarray.make_surface(rgb.swapaxes(0, 1))
     surface.blit(cam_surface, (0, 0))
+
+    if status:
+        banner_font = pygame.font.SysFont("monospace", 16, bold=True)
+        surface.blit(banner_font.render(status, True, (255, 210, 80)), (10, 8))
 
     if landmarks:
         for point in landmarks:
@@ -678,6 +822,10 @@ def main() -> None:
     ):
         if value <= 0:
             raise SystemExit(f"{flag} must be positive, got {value}")
+    if args.baseline_frames <= 0:
+        raise SystemExit(
+            f"--baseline-frames must be positive, got {args.baseline_frames}"
+        )
 
     # Heavy/optional dependencies are imported here, not at module scope, so
     # apply_blendshape_map/OneEuroFilter/build_frame stay importable and
@@ -727,6 +875,22 @@ def main() -> None:
         else:
             pitch, roll = args.neck_baseline
             print(f"neck: baseline fixed at pitch {pitch:+.2f} roll {roll:+.2f} deg")
+
+    blendshape_baseline: BlendshapeBaseline | None = None
+    if not args.no_blendshape_baseline:
+        loaded = (
+            load_blendshape_baseline(args.baseline_load)
+            if args.baseline_load is not None
+            else None
+        )
+        blendshape_baseline = BlendshapeBaseline(args.baseline_frames, loaded)
+        if loaded is not None:
+            print(f"blendshapes: rest baseline loaded from {args.baseline_load}")
+        else:
+            print(
+                f"blendshapes: averaging the first {args.baseline_frames} frames "
+                "with a face for the rest baseline -- hold a neutral expression"
+            )
 
     preview_surface = None
     neutral_reference: list[float | None] | None = None
@@ -780,6 +944,36 @@ def main() -> None:
             if result.face_landmarks:
                 landmarks = result.face_landmarks[0]
 
+            calibrating: str | None = None
+            if blendshape_baseline is not None and scores:
+                had_baseline = blendshape_baseline.value is not None
+                baseline = blendshape_baseline.observe(scores)
+                if baseline is None:
+                    done, total = blendshape_baseline.progress
+                    calibrating = f"hold neutral -- rest baseline {done}/{total}"
+                    print(f"\r{calibrating}", end="", flush=True)
+                    # No trustworthy zero yet, so rest every mapped channel at
+                    # its calibrated neutral -- same rule as the neck below.
+                    scores = {}
+                else:
+                    if not had_baseline:
+                        peaks = ", ".join(
+                            f"{name} {value:.3f}"
+                            for name, value in blendshape_baseline.top_entries()
+                        )
+                        print(
+                            f"\nblendshapes: rest baseline captured; highest: {peaks}"
+                        )
+                        if args.baseline_save is not None:
+                            args.baseline_save.write_text(
+                                json.dumps(baseline, indent=2, sort_keys=True) + "\n",
+                                encoding="utf-8",
+                            )
+                            print(
+                                f"blendshapes: baseline written to {args.baseline_save}"
+                            )
+                    scores = blendshape_baseline.rebase(scores)
+
             raw_coefficients = apply_blendshape_map(scores)
 
             if not args.no_neck:
@@ -821,7 +1015,12 @@ def main() -> None:
 
             if preview_surface is not None:
                 draw_preview(
-                    preview_surface, frame_bgr, landmarks, smoothed, neutral_reference
+                    preview_surface,
+                    frame_bgr,
+                    landmarks,
+                    smoothed,
+                    neutral_reference,
+                    status=calibrating,
                 )
                 import pygame
 

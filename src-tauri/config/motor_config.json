@@ -484,8 +484,8 @@
       "offset": 0.0,
       "minLogical": 75.0,
       "maxLogical": 105.0,
-      "neutralApplied": 90.0,
-      "neutralLogical": 90.0,
+      "neutralApplied": 95.5,
+      "neutralLogical": 95.5,
       "enabled": true
     }
   ],
@@ -645,7 +645,7 @@
         0.0,
         0.0,
         1.0,
-        -0.6
+        -0.707317
       ]
     },
     {
@@ -835,7 +835,7 @@
         0.0,
         0.0,
         0.4,
-        0.8333333333333334
+        0.736842
       ]
     }
   ],

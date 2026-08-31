@@ -205,7 +205,7 @@ MOTOR_INITIAL_APPLIED = {
     28: 79.5,
     29: 79.0,
     30: 90.0,
-    31: 90.0,
+    31: 95.5,  # measured level head 2026-08-29 (ledger)
 }
 
 # Jaw linkage compensation.

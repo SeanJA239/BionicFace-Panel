@@ -242,13 +242,17 @@ _MAPPED_CHANNEL_IDS = tuple(sorted(BLENDSHAPE_MAP.keys()))
 # would need a third servo on a vertical axis, so it is unreachable and is not
 # mapped at all, however well it can be detected.
 NECK_CHANNEL_IDS = (30, 31)
-# Both channels run 75..105 degrees with neutral at 90, so each rests at
-# coefficient 0.5 with 0.5 of travel either way. Pitch and roll draw on that
-# same budget, so each mode gets half: full nod plus full tilt then lands
-# exactly on the limit rather than relying on the clamp, which is the same rule
-# the blendshape weights above follow. Regenerate these if the neck limits move.
-NECK_NEUTRAL = 0.5
-NECK_MODE_BUDGET = 0.25
+# Both channels run 75..105 degrees, but their measured level-head neutrals
+# differ: ch30 rests at 90 (coefficient 0.5), ch31 at 95.5 (0.6833, measured on
+# hardware 2026-08-29 -- see docs/hardware/CHANNEL_VERIFICATION.md). A pure nod
+# or tilt must move both servos by the same DEGREES, so the shared budget is
+# set in degrees by the tightest side across both channels:
+# min(15, 15, 9.5, 20.5) = 9.5 deg total, half per mode. Full nod plus full
+# tilt then lands ch31 exactly on its upper limit rather than relying on the
+# clamp, the same rule the blendshape weights above follow. Regenerate these if
+# the neck limits or neutrals move.
+NECK_REST = (0.5, 20.5 / 30.0)
+NECK_MODE_BUDGET = 4.75 / 30.0
 # Frames averaged for the automatic baseline; ~1s at SEND_HZ.
 NECK_BASELINE_FRAMES = 30
 # Same idea for the blendshape rest baseline (see BlendshapeBaseline).
@@ -288,8 +292,8 @@ def neck_coefficients(
     common = clamp_signed(pitch_deg / pitch_range_deg) * NECK_MODE_BUDGET
     differential = clamp_signed(roll_deg / roll_range_deg) * NECK_MODE_BUDGET
     return (
-        clamp01(NECK_NEUTRAL + common + differential),
-        clamp01(NECK_NEUTRAL + common - differential),
+        clamp01(NECK_REST[0] + common + differential),
+        clamp01(NECK_REST[1] + common - differential),
     )
 
 
@@ -985,7 +989,7 @@ def main() -> None:
                 # No face, or no baseline yet, means no trustworthy zero, so
                 # rest at neutral rather than driving off an unknown reference --
                 # which is also what the blendshape channels do on empty scores.
-                neck = (NECK_NEUTRAL, NECK_NEUTRAL)
+                neck = NECK_REST
                 if result.facial_transformation_matrixes:
                     pitch, _yaw, roll = head_pose_degrees(
                         result.facial_transformation_matrixes[0], cv2

@@ -58,14 +58,14 @@ const BLINK_CLOSE_DURATION: Duration = Duration::from_millis(80);
 const BLINK_HOLD_DURATION: Duration = Duration::from_millis(60);
 const BLINK_OPEN_DURATION: Duration = Duration::from_millis(120);
 const BLINK_EYELID_CHANNELS: [usize; 4] = [9, 10, 11, 12];
-// `+1` norm is "closed" for three of the four eyelid channels; channel 11
-// (eye_right_upper) is mounted so its rotation direction is mirrored, so
-// its closed end is `-1`. Confirmed on real hardware during idle-blink
-// observation. Channel 12 (eye_right_lower) is left at `+1` for now --
-// unconfirmed whether it needs the same mirroring, revisit if it looks
-// wrong during idle blink too.
+// `+1` norm is "closed" for the left eyelid channels; both right-side
+// channels are mounted with their rotation direction mirrored, so their
+// closed end is `-1`. Channel 11 (eye_right_upper) was confirmed on real
+// hardware during idle-blink observation; channel 12 (eye_right_lower) was
+// confirmed by single-channel jogging on real hardware (2026-08-29, see
+// docs/hardware/CHANNEL_VERIFICATION.md).
 const BLINK_CLOSED_NORM: f32 = 1.0;
-const BLINK_CLOSE_DIRECTIONS: [(usize, f32); 4] = [(9, 1.0), (10, 1.0), (11, -1.0), (12, 1.0)];
+const BLINK_CLOSE_DIRECTIONS: [(usize, f32); 4] = [(9, 1.0), (10, 1.0), (11, -1.0), (12, -1.0)];
 
 fn blink_close_direction(channel_id: usize) -> f32 {
     BLINK_CLOSE_DIRECTIONS
@@ -2893,11 +2893,14 @@ mod tests {
         let mut state = idle_ready_state();
         // plain_state() pins every test channel's neutral to its min, which
         // makes negative norm degenerate (maps to 0 regardless of sign) --
-        // give channel 11 a real span around its neutral so the mirrored
-        // "closed" direction is actually observable below.
-        state.channels[11] = ch_with_id(11, -1.0, 1.0, 0.0);
-        state.target_applied[11] = 0.0;
-        state.current_applied[11] = 0.0;
+        // give the mirrored channels 11 and 12 a real span around their
+        // neutrals so the mirrored "closed" direction is actually observable
+        // below.
+        for channel_id in [11, 12] {
+            state.channels[channel_id] = ch_with_id(channel_id, -1.0, 1.0, 0.0);
+            state.target_applied[channel_id] = 0.0;
+            state.current_applied[channel_id] = 0.0;
+        }
         // Keep noise off the eyelid channels so only the blink moves them.
         state.idle_behavior.noise_channel_ids = vec![];
         update_idle_behavior(&mut state, false);

@@ -167,17 +167,18 @@ BLENDSHAPE_MAP: dict[int, list[tuple[str, float, float]]] = {
     ],
     # Eyelids (9-12): the blendshape is eye *closure*, so each weight points
     # from the resting-open coefficient towards that channel's closed end.
-    # Which end that is comes from control.rs's BLINK_CLOSE_DIRECTIONS, which
-    # was checked against real hardware: closed is the high end for 9/10/12 and
-    # the low end for 11, whose servo is mounted mirrored -- hence the negative
-    # weight there. Channel 12's direction is still marked unconfirmed in that
-    # table; if idle blink looks wrong on the right lower lid, flip 12 too.
-    # Channels 9 and 12 rest at 0.722, leaving only 0.278 of closing travel, so
-    # a full blink will not look like much until those neutrals are revisited.
+    # Which end that is comes from control.rs's BLINK_CLOSE_DIRECTIONS, checked
+    # against real hardware: closed is the high end for the left lids 9/10 and
+    # the low end for both right lids 11/12, whose servos are mounted mirrored
+    # -- hence the negative weights. Channel 11 was confirmed via idle blink,
+    # channel 12 by single-channel jogging (2026-08-29, see
+    # docs/hardware/CHANNEL_VERIFICATION.md).
+    # Channel 9 rests at 0.722 with only 0.278 of closing travel, so a full
+    # left-lid blink will not look like much until that neutral is revisited.
     9: [("eyeBlinkLeft", 0.278, 0.722)],  # eye_left_upper
     10: [("eyeBlinkLeft", 0.578, 0.422)],  # eye_left_lower
     11: [("eyeBlinkRight", -0.677, 0.677)],  # eye_right_upper (mirrored mount)
-    12: [("eyeBlinkRight", 0.278, 0.722)],  # eye_right_lower
+    12: [("eyeBlinkRight", -0.722, 0.722)],  # eye_right_lower (mirrored mount)
     # Mouth (14-23). Upper/lower lip channels respond to pucker (both sides)
     # plus their own side's "upper lip up"/"lower lip down"; the corner channels
     # are driven by smile against frown, with the lower corners moving opposite

@@ -3,11 +3,15 @@ executor for development without hardware.
 
 Listens on a UDP port for the exact wire protocol the Rust ControlService
 sends (`{"frameId", "timestampNs", "source", "angles"}`, 32 floats), and
-renders a line-art face in the style of the original frontend topology view
-(commit b58a660's src/topology.ts): every servo is a colored anchor dot
-placed at its anatomical position, and the facial lines (brows, lids, lips,
-jaw outline...) are curves drawn through those anchors, so each channel's
-motion is visible as a deformation of the face lines around its dot.
+renders a layered line-art face (hardware review 2026-08-29, see the photo in
+docs/hardware/face_frontal.jpg): a static skull with fixed UPPER teeth, eyes
+whose gaze channels move the pupils (not dots), a rigid jaw carrying the LOWER
+teeth, and an independent lip ring drawn in front of the teeth -- so "lips
+parted over a closed jaw" shows closed teeth behind open lips instead of
+looking like an open jaw. Anchor dots are drawn only for channels that are
+real surface actuation points (DOT_CHANNELS); their rest positions come from
+docs/hardware/face_anchors.json once the jog sweep fills channel_mapping, and
+fall back to the hand-written constants until then.
 
 Channel placement and grouping follow the CURRENT channel table in
 raspi/config.py / motor_config.json (the old topology.ts ids 8-13 and 24-27
@@ -41,6 +45,7 @@ protocol still carries plain applied degrees.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import socket
@@ -67,6 +72,8 @@ EYE_WHITE = (238, 242, 248)
 PUPIL_COLOR = (18, 22, 30)
 LIP_COLOR = (216, 120, 126)
 MOUTH_INNER = (36, 18, 24)
+TOOTH_COLOR = (224, 226, 219)
+TOOTH_EDGE = (148, 152, 148)
 DISABLED_NODE_COLOR = (105, 112, 124)
 HUD_COLOR = (200, 220, 230)
 LOST_COLOR = (230, 60, 60)
@@ -146,6 +153,26 @@ def render_scales(channels: list[Channel]) -> list[float]:
         shared = max(own[right], own[left])
         scales[right] = scales[left] = shared
     return [s if s > 1e-6 else 1.0 for s in scales]
+
+
+ANCHORS_PATH = ROOT / "docs" / "hardware" / "face_anchors.json"
+
+# Channels that are actual surface actuation points and therefore get an anchor
+# dot: brow/cheek/nose tendons, eyelids, and the lip ring. Everything else has
+# a dedicated representation instead -- 8/13 move the pupils, 24/25 move the
+# rigid jaw, 26/27 are depth-axis (HUD numbers only, a frontal 2D view cannot
+# show them), 28/29 are disabled tongue channels, 30/31 tilt the whole head.
+DOT_CHANNELS = frozenset(range(8)) | frozenset(range(9, 13)) | frozenset(range(14, 24))
+
+# Teeth geometry in face-local units. The upper row is part of the skull
+# (fixed); the lower row rides the jaw. At rest the rows meet at OCCLUSION_Y;
+# jaw open drops the lower band, exposing the dark mouth interior between them.
+TEETH_HALF_WIDTH = 78.0
+UPPER_TEETH_TOP = 46.0
+OCCLUSION_Y = 60.0
+LOWER_TEETH_BOTTOM = 74.0
+TOOTH_PITCH = 13.0
+TEETH_SAMPLE_STEP = 4.0
 
 
 GROUP_COLORS = {
@@ -285,10 +312,145 @@ def catmull_rom(points: list[Point], samples: int = 12) -> list[Point]:
     return out
 
 
+def load_photo_anchors(
+    path: Path, eye_left_local: Point, eye_right_local: Point
+) -> dict[int, Point]:
+    """Face-local rest positions measured on the hardware photo, per channel.
+
+    docs/hardware/face_anchors.json carries the dots marked on the skinless
+    frontal photo (normalized image coordinates) plus a channel_mapping filled
+    in by the jog sweep. Photo coordinates map into face-local space through a
+    similarity transform anchored on the two pupils. The photo and the twin
+    face are both observer-view (+x = screen right = subject's left), so no
+    mirror flip is needed; the photo is assumed upright, so no roll term.
+
+    Returns {} when the file or its channel_mapping is absent (the mapping
+    ships as a TODO string until the sweep fills it), keeping every channel on
+    the hand-written fallback constants unchanged.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    mapping = raw.get("channel_mapping")
+    candidates = raw.get("red_candidates")
+    pupils = raw.get("pupils")
+    if not isinstance(mapping, dict) or not candidates or not pupils:
+        return {}
+
+    width, height = raw["image_size"]
+    pts = [(p[0] * width, p[1] * height) for p in pupils]
+    if len(pts) < 2:
+        return {}
+    # The dot detector can pick up stray blue marks; the true pupils are the
+    # pair sitting at nearly the same height.
+    pair = min(
+        ((a, b) for i, a in enumerate(pts) for b in pts[i + 1 :]),
+        key=lambda ab: abs(ab[0][1] - ab[1][1]),
+    )
+    photo_left, photo_right = sorted(pair, key=lambda pt: pt[0])
+    span = math.hypot(photo_right[0] - photo_left[0], photo_right[1] - photo_left[1])
+    if span < 1e-6:
+        return {}
+    scale = (eye_right_local[0] - eye_left_local[0]) / span
+    mid_photo = (
+        (photo_left[0] + photo_right[0]) / 2.0,
+        (photo_left[1] + photo_right[1]) / 2.0,
+    )
+    mid_local = (
+        (eye_left_local[0] + eye_right_local[0]) / 2.0,
+        (eye_left_local[1] + eye_right_local[1]) / 2.0,
+    )
+
+    anchors: dict[int, Point] = {}
+    for channel_str, candidate in mapping.items():
+        pos = candidates.get(str(candidate))
+        if pos is None:
+            continue
+        px, py = pos[0] * width, pos[1] * height
+        anchors[int(channel_str)] = (
+            mid_local[0] + (px - mid_photo[0]) * scale,
+            mid_local[1] + (py - mid_photo[1]) * scale,
+        )
+    return anchors
+
+
+def curve_y_at(points: list[Point], x: float) -> float | None:
+    """Linear-interpolated y of a sampled curve at x; None outside its span.
+
+    The lip curves run right corner (-x) to left corner (+x); Catmull-Rom can
+    wiggle near the ends, so the first crossing wins.
+    """
+    for (x0, y0), (x1, y1) in itertools.pairwise(points):
+        if (x0 - x) * (x1 - x) <= 0.0 and abs(x1 - x0) > 1e-9:
+            return y0 + (x - x0) / (x1 - x0) * (y1 - y0)
+    return None
+
+
+def teeth_strips(
+    band_top: float,
+    band_bottom: float,
+    upper_lip: list[Point],
+    lower_lip: list[Point],
+    x_shift: float = 0.0,
+) -> tuple[list[list[Point]], list[tuple[Point, Point]]]:
+    """Visible tooth-band polygons, clipped per x-sample to the lip opening.
+
+    Clipping is geometric rather than raster (pygame clips only to rects and
+    SVG would need clipPath defs, and this way both renderers share one
+    algorithm): at each sample x the band is intersected with the
+    [upper lip, lower lip] interval, and contiguous samples become filled
+    strips. `x_shift` rides the lower band on the jaw's lateral shift.
+    Returns (strips, tooth-separator segments), all in face-local coords.
+    """
+    strips: list[list[Point]] = []
+    separators: list[tuple[Point, Point]] = []
+    top_run: list[Point] = []
+    bottom_run: list[Point] = []
+
+    def visible_interval(fx: float) -> tuple[float, float] | None:
+        yu = curve_y_at(upper_lip, fx)
+        yl = curve_y_at(lower_lip, fx)
+        if yu is None or yl is None:
+            return None
+        top, bottom = max(band_top, yu), min(band_bottom, yl)
+        return (top, bottom) if top < bottom - 0.5 else None
+
+    def close_run() -> None:
+        if len(top_run) >= 2:
+            strips.append(top_run[:] + bottom_run[::-1])
+        top_run.clear()
+        bottom_run.clear()
+
+    steps = int(2 * TEETH_HALF_WIDTH / TEETH_SAMPLE_STEP)
+    for i in range(steps + 1):
+        fx = -TEETH_HALF_WIDTH + i * TEETH_SAMPLE_STEP + x_shift
+        interval = visible_interval(fx)
+        if interval is None:
+            close_run()
+        else:
+            top_run.append((fx, interval[0]))
+            bottom_run.append((fx, interval[1]))
+    close_run()
+
+    boundaries = int(2 * TEETH_HALF_WIDTH / TOOTH_PITCH)
+    for k in range(1, boundaries + 1):
+        fx = -TEETH_HALF_WIDTH + k * TOOTH_PITCH + x_shift
+        interval = visible_interval(fx)
+        if interval is not None:
+            separators.append(((fx, interval[0]), (fx, interval[1])))
+    return strips, separators
+
+
 class FaceRenderer:
-    """Line-art face in face-local coordinates: origin at FACE_CENTER,
+    """Layered line-art face in face-local coordinates: origin at FACE_CENTER,
     +x = screen right = subject's LEFT (channel names are subject-relative,
     mirrored like the original topology view), +y = down.
+
+    Layers back-to-front: static skull (outline, nose, UPPER teeth), eyes
+    (pupils carry gaze channels 8/13), rigid jaw (LOWER teeth; open from 25,
+    lateral from 24; 26/27 are depth-axis and only appear as HUD numbers),
+    the lip ring (14-23) drawn in front of the teeth, and the neck tilt.
 
     Direction conventions per group (assumed, see module docstring):
     +deviation = brow raised, lid closed, upper corner up / lower corner
@@ -306,15 +468,28 @@ class FaceRenderer:
     EYE_HALF_WIDTH = 34.0
     EYE_APERTURE_UPPER = 15.0
     EYE_APERTURE_LOWER = 11.0
+    EYE_CENTER_X = 75.0
+    EYE_CENTER_Y = -120.0
 
     def __init__(self, channels: list[Channel]) -> None:
         self.channels = channels
         self.render_scales = render_scales(channels)
+        self.photo_anchors = load_photo_anchors(
+            ANCHORS_PATH,
+            (-self.EYE_CENTER_X, self.EYE_CENTER_Y),
+            (self.EYE_CENTER_X, self.EYE_CENTER_Y),
+        )
         self.show_nodes = True
         pygame.font.init()
         self.font = pygame.font.SysFont("monospace", 18)
         self.font_small = pygame.font.SysFont("monospace", 13, bold=True)
         self.font_big = pygame.font.SysFont("monospace", 36, bold=True)
+
+    def rest(self, channel_id: int, default: Point) -> Point:
+        """Rest position of a channel's feature point: the photo-measured
+        anchor when the jog sweep has mapped it, the hand-written constant
+        otherwise. Motion offsets are applied on top either way."""
+        return self.photo_anchors.get(channel_id, default)
 
     def dev(self, channel_id: int, angles: list[float]) -> float:
         """Displacement from neutral in units of the channel's render scale,
@@ -348,6 +523,16 @@ class FaceRenderer:
         # distance from neutral in either direction counts as open. TODO:
         # hardware calibration may reveal this should be one-sided.
         return abs(self.dev(25, angles)) * self.JAW_OPEN_RANGE_PX
+
+    def depth_readout(self, angles: list[float]) -> str:
+        """Jaw numbers for the HUD. 26/27 move the jaw along the depth axis,
+        which a frontal 2D view cannot show -- deliberately not drawn as a
+        (fake) shape change; the numbers are the whole representation."""
+        return (
+            f"jaw open {abs(self.dev(25, angles)):.2f}"
+            f"  shift {self.dev(24, angles):+.2f}"
+            f"  depth 26:{self.dev(26, angles):+.2f} 27:{self.dev(27, angles):+.2f}"
+        )
 
     def draw(self, surface: pygame.Surface, angles: list[float]) -> None:
         tilt = self.tilt_radians(angles)
@@ -384,11 +569,12 @@ class FaceRenderer:
 
     def _draw_neck(self, surface, angles, fixed: Transform, nodes) -> None:
         # The neck pair stays in screen space (the head tilts on top of it).
-        for side, ch in ((1, 30), (-1, 31)):
+        # 30/31 get no dots: their whole representation is the head tilt.
+        del angles, nodes
+        for side in (1, -1):
             pygame.draw.line(
                 surface, OUTLINE_COLOR, fixed(side * 72, 200), fixed(side * 95, 292), 4
             )
-            nodes[ch] = fixed(side * 84, 248 - 14.0 * self.dev(ch, angles))
 
     def _draw_head(
         self, surface, angles, jaw_open, jaw_x, to_screen: Transform, nodes
@@ -404,33 +590,28 @@ class FaceRenderer:
             surface, OUTLINE_COLOR, False, [to_screen(x, y) for x, y in arc], 3
         )
 
-        # Jaw outline: cheeks -> jaw corner channels 26/27 -> chin. Opening
-        # drops it (weights grow toward the chin) and 24 shears it sideways.
-        d26 = self.dev(26, angles)
-        d27 = self.dev(27, angles)
+        # Jaw outline moves as a rigid body: open (25) drops it, 24 shears it
+        # sideways. 26/27 are depth-axis and deliberately absent here (see
+        # depth_readout); the jaw group gets no anchor dots -- the outline and
+        # the lower teeth ARE its representation.
+        del angles, nodes
         chin = [
             (-160.0, 80.0),
-            (-95.0 + jaw_x, 170.0 + 0.7 * jaw_open + 16.0 * d26),
+            (-95.0 + jaw_x, 170.0 + 0.7 * jaw_open),
             (jaw_x, 195.0 + jaw_open),
-            (95.0 + jaw_x, 170.0 + 0.7 * jaw_open + 16.0 * d27),
+            (95.0 + jaw_x, 170.0 + 0.7 * jaw_open),
             (160.0, 80.0),
         ]
         self._curve(surface, chin, to_screen, OUTLINE_COLOR, 3)
-
-        nodes[26] = to_screen(*chin[1])
-        nodes[27] = to_screen(*chin[3])
-        nodes[24] = to_screen(jaw_x, 168.0 + 0.9 * jaw_open)
-        nodes[25] = to_screen(-85.0, 145.0 + jaw_open)
-        # Tongue channels (usually disabled): parked inside the jaw region.
-        nodes[28] = to_screen(-20.0, 150.0 + 0.8 * jaw_open)
-        nodes[29] = to_screen(20.0, 162.0 + 0.8 * jaw_open)
 
     def _draw_brows(self, surface, angles, to_screen: Transform, nodes) -> None:
         # Subject-right brow (0/1) on screen-left. Outer ends sit higher,
         # matching the original topology layout.
         for side, inner_ch, outer_ch in ((-1, 0, 1), (1, 2, 3)):
-            ix, iy = side * 70.0, -168.0 - 26.0 * self.dev(inner_ch, angles)
-            ox, oy = side * 130.0, -180.0 - 22.0 * self.dev(outer_ch, angles)
+            rix, riy = self.rest(inner_ch, (side * 70.0, -168.0))
+            rox, roy = self.rest(outer_ch, (side * 130.0, -180.0))
+            ix, iy = rix, riy - 26.0 * self.dev(inner_ch, angles)
+            ox, oy = rox, roy - 22.0 * self.dev(outer_ch, angles)
             mid = ((ix + ox) / 2.0, (iy + oy) / 2.0 - 5.0)
             self._curve(surface, [(ix, iy), mid, (ox, oy)], to_screen, LINE_COLOR, 5)
             nodes[inner_ch] = to_screen(ix, iy)
@@ -442,7 +623,7 @@ class FaceRenderer:
 
         # side=-1 -> screen-left eye = subject's RIGHT (channels 11/12).
         for side, upper_ch, lower_ch in ((-1, 11, 12), (1, 9, 10)):
-            cx, cy = side * 75.0, -120.0
+            cx, cy = side * self.EYE_CENTER_X, self.EYE_CENTER_Y
             hw = self.EYE_HALF_WIDTH
             ap_u = clamp(
                 self.EYE_APERTURE_UPPER * (1.0 - self.dev(upper_ch, angles)), 0.0, 24.0
@@ -476,13 +657,13 @@ class FaceRenderer:
                     3,
                 )
 
-            nodes[upper_ch] = to_screen(cx, cy - ap_u)
-            nodes[lower_ch] = to_screen(cx, cy + ap_l)
+            ru = self.rest(upper_ch, (cx, cy - self.EYE_APERTURE_UPPER))
+            rl = self.rest(lower_ch, (cx, cy + self.EYE_APERTURE_LOWER))
+            nodes[upper_ch] = to_screen(ru[0], ru[1] + (self.EYE_APERTURE_UPPER - ap_u))
+            nodes[lower_ch] = to_screen(rl[0], rl[1] - (self.EYE_APERTURE_LOWER - ap_l))
 
-        # Shared gaze mechanisms get their own dots between the eyes, moving
-        # along the axis they steer.
-        nodes[8] = to_screen(gaze_x, -132.0)
-        nodes[13] = to_screen(0.0, -108.0 + gaze_y)
+        # 8/13 get no dots: they are rotations of the shared eye mechanism, not
+        # surface points -- the pupils are their whole representation.
 
     def _draw_nose(self, surface, angles, to_screen: Transform, nodes) -> None:
         pygame.draw.line(
@@ -493,14 +674,17 @@ class FaceRenderer:
         lift_r = -8.0 * self.dev(6, angles)
         base = [(-24.0, -40.0 + lift_r), (0.0, -30.0), (24.0, -40.0 + lift_l)]
         self._curve(surface, base, to_screen, LINE_COLOR, 3)
-        nodes[5] = to_screen(92.0, -80.0 - 14.0 * self.dev(5, angles))
-        nodes[6] = to_screen(-92.0, -80.0 - 14.0 * self.dev(6, angles))
+        r5 = self.rest(5, (92.0, -80.0))
+        r6 = self.rest(6, (-92.0, -80.0))
+        nodes[5] = to_screen(r5[0], r5[1] - 14.0 * self.dev(5, angles))
+        nodes[6] = to_screen(r6[0], r6[1] - 14.0 * self.dev(6, angles))
 
     def _draw_cheeks(self, surface, angles, to_screen: Transform, nodes) -> None:
         # Cheek tendon pulls its arc up and outward (smile apple / squint).
         for side, ch in ((1, 4), (-1, 7)):
             d = self.dev(ch, angles)
-            ax, ay = side * (150.0 + 6.0 * d), -45.0 - 18.0 * d
+            rx, ry = self.rest(ch, (side * 150.0, -45.0))
+            ax, ay = rx + side * 6.0 * d, ry - 18.0 * d
             self._curve(
                 surface,
                 [(side * 118.0, -95.0), (ax, ay), (side * 138.0, 28.0)],
@@ -513,13 +697,24 @@ class FaceRenderer:
     def _draw_mouth(
         self, surface, angles, jaw_open, jaw_x, to_screen: Transform, nodes
     ) -> None:
+        # The lip ring is its own layer, but it still rides the jaw a little:
+        # with skin on, the lower lip sits on the jaw. The teeth do not follow
+        # the lip channels at all -- that separation is what makes "lips parted
+        # over a closed jaw" (closed teeth behind open lips) distinguishable
+        # from an open jaw (a dark gap between the tooth rows).
         up_lift = -0.12 * jaw_open  # upper lip eases up slightly as jaw drops
         low_drop = 0.85 * jaw_open
 
         def pt(
-            ch: int, x: float, y: float, move_y: float, shift_x: float = 0.0
+            ch: int,
+            x: float,
+            y: float,
+            move_y: float,
+            shift_x: float = 0.0,
+            follow_y: float = 0.0,
         ) -> Point:
-            p = (x + shift_x, y + move_y * self.dev(ch, angles))
+            rx, ry = self.rest(ch, (x, y))
+            p = (rx + shift_x, ry + follow_y + move_y * self.dev(ch, angles))
             nodes[ch] = to_screen(*p)
             return p
 
@@ -542,9 +737,12 @@ class FaceRenderer:
             low = self.dev(lower_ch, angles)
             lift = (up - low) / 2
             outward = (up + low) / 2
+            # The pair shares one physical corner, so either channel's mapped
+            # anchor (upper wins) positions the rest point.
+            rx, ry = self.rest(upper_ch, self.rest(lower_ch, (side * 106.0, 56.0)))
             p = (
-                side * (106.0 + outward * self.CORNER_HORIZONTAL_RANGE_PX),
-                56.0 + (up_lift + low_drop) / 2 - lift * self.CORNER_VERTICAL_RANGE_PX,
+                rx + side * outward * self.CORNER_HORIZONTAL_RANGE_PX,
+                ry + (up_lift + low_drop) / 2 - lift * self.CORNER_VERTICAL_RANGE_PX,
             )
             nodes[upper_ch] = to_screen(*p)
             nodes[lower_ch] = to_screen(*p)
@@ -558,23 +756,45 @@ class FaceRenderer:
         # the lower, which also follows the jaw sideways (channel 24).
         upper = [
             right_corner,
-            pt(16, -52.0, 46.0 + up_lift, -14.0),
-            pt(15, 0.0, 44.0 + up_lift, -12.0),
-            pt(14, 52.0, 46.0 + up_lift, -14.0),
+            pt(16, -52.0, 46.0, -14.0, follow_y=up_lift),
+            pt(15, 0.0, 44.0, -12.0, follow_y=up_lift),
+            pt(14, 52.0, 46.0, -14.0, follow_y=up_lift),
             left_corner,
         ]
         lower = [
             right_corner,
-            pt(22, -52.0, 58.0 + low_drop, 16.0, jaw_x),
-            pt(23, 0.0, 62.0 + low_drop, 18.0, jaw_x),
-            pt(21, 52.0, 58.0 + low_drop, 16.0, jaw_x),
+            pt(22, -52.0, 58.0, 16.0, jaw_x, follow_y=low_drop),
+            pt(23, 0.0, 62.0, 18.0, jaw_x, follow_y=low_drop),
+            pt(21, 52.0, 58.0, 16.0, jaw_x, follow_y=low_drop),
             left_corner,
         ]
 
-        interior = [
-            to_screen(x, y) for x, y in catmull_rom(upper) + catmull_rom(lower[::-1])
-        ]
+        upper_pts = catmull_rom(upper)
+        lower_pts = catmull_rom(lower)
+        interior = [to_screen(x, y) for x, y in upper_pts + lower_pts[::-1]]
         pygame.draw.polygon(surface, MOUTH_INNER, interior)
+
+        # Teeth, clipped to the lip opening. Upper row is skull-fixed; the
+        # lower row rides the rigid jaw (full open drop + lateral shift).
+        upper_strips, upper_seps = teeth_strips(
+            UPPER_TEETH_TOP, OCCLUSION_Y, upper_pts, lower_pts
+        )
+        lower_strips, lower_seps = teeth_strips(
+            OCCLUSION_Y + jaw_open,
+            LOWER_TEETH_BOTTOM + jaw_open,
+            upper_pts,
+            lower_pts,
+            x_shift=jaw_x,
+        )
+        for strip in upper_strips + lower_strips:
+            screen_strip = [to_screen(x, y) for x, y in strip]
+            pygame.draw.polygon(surface, TOOTH_COLOR, screen_strip)
+            pygame.draw.polygon(surface, TOOTH_EDGE, screen_strip, 1)
+        for (x0, y0), (x1, y1) in upper_seps + lower_seps:
+            pygame.draw.line(
+                surface, TOOTH_EDGE, to_screen(x0, y0), to_screen(x1, y1), 1
+            )
+
         self._curve(surface, upper, to_screen, LIP_COLOR, 4)
         self._curve(surface, lower, to_screen, LIP_COLOR, 4)
 
@@ -614,6 +834,9 @@ def draw_hud(
         f"last frame: {format_hud_time(since)}   [N] anchors", True, HUD_COLOR
     )
     surface.blit(bottom_left, (12, SCREEN_SIZE[1] - 26))
+
+    depth = renderer.font.render(renderer.depth_readout(latest.angles), True, HUD_COLOR)
+    surface.blit(depth, (12, SCREEN_SIZE[1] - 50))
 
     if since > SIGNAL_LOST_TIMEOUT_S:
         lost = renderer.font_big.render("信号丢失 / SIGNAL LOST", True, LOST_COLOR)

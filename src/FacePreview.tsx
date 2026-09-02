@@ -1,14 +1,18 @@
 import { memo } from "react";
+import photoAnchorsFile from "../docs/hardware/face_anchors.json";
 import type { MotorChannel } from "./tauri";
 
-// Line-art anchor-dot face, matching tools/face_visualizer.py's FaceRenderer
-// (commit c99f338): every servo is a colored anchor point placed at its
-// anatomical position, and the facial lines (brows, jaw outline, cheeks,
-// nose) are smooth curves drawn through those anchors -- no filled face
-// shape, so a channel's motion reads as a deformation of the lines
-// themselves, not a texture swap. Proportions (round eye sockets, a
-// prominent central nose ridge, wide-set eyes) are tuned against a photo of
-// the actual printed skull + servo rig, not guessed from nothing.
+// Layered line-art face, matching tools/face_visualizer.py's FaceRenderer
+// (hardware review 2026-08-29, photo: docs/hardware/face_frontal.jpg):
+// a static skull with fixed UPPER teeth, eyes whose gaze channels (8/13) move
+// the pupils rather than dots, a rigid jaw carrying the LOWER teeth (open from
+// 25, lateral from 24; 26/27 are depth-axis and appear only as a numeric
+// readout), and an independent lip ring drawn in front of the teeth -- so
+// "lips parted over a closed jaw" shows closed teeth behind open lips instead
+// of looking like an open jaw. Anchor dots are drawn only for channels that
+// are real surface actuation points (DOT_CHANNELS); their rest positions come
+// from docs/hardware/face_anchors.json once the jog sweep fills
+// channel_mapping, and fall back to the hand-written constants until then.
 //
 // This only has the wire-protocol `applied` degrees + each channel's own
 // min/max/neutral (like the Python renderer does) -- no access to Rust's
@@ -104,6 +108,9 @@ const EYE_WHITE = "#eef2f8";
 const PUPIL_COLOR = "#12121e";
 const LIP_COLOR = "#d8787e";
 const MOUTH_INNER = "#241218";
+const TOOTH_COLOR = "#e0e2db";
+const TOOTH_EDGE = "#949894";
+const HUD_TEXT = "#c8dce6";
 
 type ChannelGroup = "brow" | "tendon" | "eye" | "mouth" | "jaw" | "neck";
 
@@ -134,8 +141,31 @@ const EYE_GAZE_RANGE_PX = 12.0;
 const EYE_HALF_WIDTH = 40.0;
 const EYE_APERTURE_UPPER = 19.0;
 const EYE_APERTURE_LOWER = 15.0;
+const EYE_CENTER_X = 80.0;
+const EYE_CENTER_Y = -110.0;
 const CORNER_VERTICAL_RANGE_PX = 22.0;
 const CORNER_HORIZONTAL_RANGE_PX = 18.0;
+
+// Channels that are actual surface actuation points and therefore get an
+// anchor dot: brow/cheek/nose tendons, eyelids, and the lip ring. Everything
+// else has a dedicated representation -- 8/13 move the pupils, 24/25 move the
+// rigid jaw, 26/27 are depth-axis (numeric readout only), 28/29 are disabled
+// tongue channels, 30/31 tilt the whole head.
+const DOT_CHANNELS: ReadonlySet<number> = new Set([
+  ...Array.from({ length: 8 }, (_, i) => i),
+  9, 10, 11, 12,
+  ...Array.from({ length: 10 }, (_, i) => 14 + i),
+]);
+
+// Teeth geometry in face-local units. The upper row is part of the skull
+// (fixed); the lower row rides the jaw. At rest the rows meet at OCCLUSION_Y;
+// jaw open drops the lower band, exposing the dark mouth interior between.
+const TEETH_HALF_WIDTH = 78.0;
+const UPPER_TEETH_TOP = 46.0;
+const OCCLUSION_Y = 60.0;
+const LOWER_TEETH_BOTTOM = 74.0;
+const TOOTH_PITCH = 13.0;
+const TEETH_SAMPLE_STEP = 4.0;
 
 function clamp(value: number, lower: number, upper: number): number {
   return Math.max(lower, Math.min(upper, value));
@@ -176,6 +206,143 @@ function catmullRom(points: Point[], samples = 12): Point[] {
   return out;
 }
 
+type PhotoAnchorsFile = {
+  image_size: [number, number];
+  red_candidates: Record<string, [number, number]>;
+  pupils: Array<[number, number]>;
+  // Ships as a TODO string until the jog sweep fills it with
+  // {channel_id: red_candidate_index}.
+  channel_mapping: unknown;
+};
+
+/** Face-local rest positions measured on the hardware photo, per channel.
+ *
+ * Photo coordinates (normalized, origin top-left) map into face-local space
+ * through a similarity transform anchored on the two pupils. Photo and twin
+ * face are both observer-view (+x = screen right = subject's left), so no
+ * mirror flip; the photo is assumed upright, so no roll term. Empty whenever
+ * channel_mapping isn't a filled dict yet -- every channel then stays on the
+ * hand-written fallback constants. Same algorithm as face_visualizer.py's
+ * load_photo_anchors. */
+function loadPhotoAnchors(
+  raw: PhotoAnchorsFile,
+  eyeLeftLocal: Point,
+  eyeRightLocal: Point,
+): Map<number, Point> {
+  const anchors = new Map<number, Point>();
+  const mapping = raw.channel_mapping;
+  if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping)) {
+    return anchors;
+  }
+  const [width, height] = raw.image_size;
+  const pts = raw.pupils.map(([nx, ny]): Point => [nx * width, ny * height]);
+  if (pts.length < 2) return anchors;
+  // The dot detector can pick up stray blue marks; the true pupils are the
+  // pair sitting at nearly the same height.
+  let best: [Point, Point] | null = null;
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      if (!best || Math.abs(pts[i][1] - pts[j][1]) < Math.abs(best[0][1] - best[1][1])) {
+        best = [pts[i], pts[j]];
+      }
+    }
+  }
+  if (!best) return anchors;
+  const [photoLeft, photoRight] = best[0][0] <= best[1][0] ? best : [best[1], best[0]];
+  const span = Math.hypot(photoRight[0] - photoLeft[0], photoRight[1] - photoLeft[1]);
+  if (span < 1e-6) return anchors;
+  const scale = (eyeRightLocal[0] - eyeLeftLocal[0]) / span;
+  const midPhoto: Point = [
+    (photoLeft[0] + photoRight[0]) / 2,
+    (photoLeft[1] + photoRight[1]) / 2,
+  ];
+  const midLocal: Point = [
+    (eyeLeftLocal[0] + eyeRightLocal[0]) / 2,
+    (eyeLeftLocal[1] + eyeRightLocal[1]) / 2,
+  ];
+  for (const [channelStr, candidate] of Object.entries(mapping as Record<string, unknown>)) {
+    const pos = raw.red_candidates[String(candidate)];
+    if (!pos) continue;
+    anchors.set(Number(channelStr), [
+      midLocal[0] + (pos[0] * width - midPhoto[0]) * scale,
+      midLocal[1] + (pos[1] * height - midPhoto[1]) * scale,
+    ]);
+  }
+  return anchors;
+}
+
+const PHOTO_ANCHORS = loadPhotoAnchors(
+  photoAnchorsFile as unknown as PhotoAnchorsFile,
+  [-EYE_CENTER_X, EYE_CENTER_Y],
+  [EYE_CENTER_X, EYE_CENTER_Y],
+);
+
+/** Linear-interpolated y of a sampled curve at x; null outside its span.
+ * The lip curves run right corner (-x) to left corner (+x); Catmull-Rom can
+ * wiggle near the ends, so the first crossing wins. */
+function curveYAt(points: Point[], x: number): number | null {
+  for (let i = 0; i + 1 < points.length; i++) {
+    const [x0, y0] = points[i];
+    const [x1, y1] = points[i + 1];
+    if ((x0 - x) * (x1 - x) <= 0 && Math.abs(x1 - x0) > 1e-9) {
+      return y0 + ((x - x0) / (x1 - x0)) * (y1 - y0);
+    }
+  }
+  return null;
+}
+
+/** Visible tooth-band polygons, clipped per x-sample to the lip opening.
+ * Geometric rather than raster clipping so pygame and SVG share one
+ * algorithm; `xShift` rides the lower band on the jaw's lateral shift.
+ * All coordinates face-local. */
+function teethStrips(
+  bandTop: number,
+  bandBottom: number,
+  upperLip: Point[],
+  lowerLip: Point[],
+  xShift = 0,
+): { strips: Point[][]; separators: Array<[Point, Point]> } {
+  const strips: Point[][] = [];
+  const separators: Array<[Point, Point]> = [];
+
+  const visibleInterval = (fx: number): [number, number] | null => {
+    const yu = curveYAt(upperLip, fx);
+    const yl = curveYAt(lowerLip, fx);
+    if (yu === null || yl === null) return null;
+    const top = Math.max(bandTop, yu);
+    const bottom = Math.min(bandBottom, yl);
+    return top < bottom - 0.5 ? [top, bottom] : null;
+  };
+
+  let topRun: Point[] = [];
+  let bottomRun: Point[] = [];
+  const closeRun = () => {
+    if (topRun.length >= 2) strips.push([...topRun, ...bottomRun.slice().reverse()]);
+    topRun = [];
+    bottomRun = [];
+  };
+  const steps = Math.floor((2 * TEETH_HALF_WIDTH) / TEETH_SAMPLE_STEP);
+  for (let i = 0; i <= steps; i++) {
+    const fx = -TEETH_HALF_WIDTH + i * TEETH_SAMPLE_STEP + xShift;
+    const interval = visibleInterval(fx);
+    if (!interval) {
+      closeRun();
+    } else {
+      topRun.push([fx, interval[0]]);
+      bottomRun.push([fx, interval[1]]);
+    }
+  }
+  closeRun();
+
+  const boundaries = Math.floor((2 * TEETH_HALF_WIDTH) / TOOTH_PITCH);
+  for (let k = 1; k <= boundaries; k++) {
+    const fx = -TEETH_HALF_WIDTH + k * TOOTH_PITCH + xShift;
+    const interval = visibleInterval(fx);
+    if (interval) separators.push([[fx, interval[0]], [fx, interval[1]]]);
+  }
+  return { strips, separators };
+}
+
 function rotate(x: number, y: number, angleRad: number): Point {
   const cos = Math.cos(angleRad);
   const sin = Math.sin(angleRad);
@@ -199,15 +366,17 @@ export type FacePose = {
     | { open: false; line: [Point, Point] }
   >;
   mouthInterior: Point[];
+  // Tooth bands (screen coords), clipped to the lip opening: upper row is
+  // skull-fixed, lower row rides the rigid jaw.
+  teethPolygons: Point[][];
+  teethSeparators: Array<[Point, Point]>;
   upperLipCurve: Point[];
   lowerLipCurve: Point[];
   nodes: Record<number, Point>;
-  // Channels 26/27 (jaw_right_lower, jaw_left) drive front-back jaw
-  // protrusion -- a depth-axis motion a straight-on 2D view can't actually
-  // show. Rather than fake a shape deformation that isn't real, these get
-  // a dedicated abstract stand-in (dot radius) instead of participating in
-  // `nodes`/the jaw outline. Revisit once a 3/4-view render exists.
-  protrusionNodes: Array<{ channel: number; point: Point; scale: number }>;
+  // Channels 26/27 drive front-back jaw protrusion -- a depth-axis motion a
+  // straight-on 2D view can't show. Deliberately not drawn as a (fake) shape
+  // change; this readout is their whole representation.
+  depthReadout: string;
 };
 
 /** Pure geometry computation, kept separate from the SVG markup below so it
@@ -231,6 +400,10 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     const value = clamp((applied[id] - channels[id].neutralApplied) / scales[id], -1, 1);
     return MIRRORED_CHANNELS.has(id) ? -value : value;
   };
+  // Rest position of a channel's feature point: the photo-measured anchor when
+  // the jog sweep has mapped it, the hand-written constant otherwise. Motion
+  // offsets are applied on top either way.
+  const rest = (id: number, fallback: Point): Point => PHOTO_ANCHORS.get(id) ?? fallback;
 
   const tiltRad = tiltRadiansFromDelta(dev(30) - dev(31));
 
@@ -248,14 +421,11 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
 
   // --- Neck (screen space, not tilted -- the head tilts on top of it) ---
   const neckLines: FacePose["neckLines"] = [];
-  for (const [side, channel] of [
-    [1, 30],
-    [-1, 31],
-  ] as const) {
+  // 30/31 get no dots: their whole representation is the head tilt.
+  for (const side of [1, -1] as const) {
     const [x1, y1] = fixed(side * 72, 200);
     const [x2, y2] = fixed(side * 95, 292);
     neckLines.push({ x1, y1, x2, y2 });
-    nodes[channel] = fixed(side * 84, 248 - 14.0 * dev(channel));
   }
 
   // --- Head outline: forehead arc + jaw outline through 26/27 ---
@@ -270,7 +440,7 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
 
   // Chin outline is driven only by channel 25 (open amount) and channel 24
   // (left-right shear) -- 26/27 are front-back (protrusion), a depth-axis
-  // motion that doesn't deform this frontal silhouette; see protrusionNodes.
+  // motion that doesn't deform this frontal silhouette; see depthReadout.
   const chin: Point[] = [
     [-160.0, 80.0],
     [-95.0 + jawX, 170.0 + 0.7 * jawOpen],
@@ -279,22 +449,22 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     [160.0, 80.0],
   ];
   const chinCurve = catmullRom(chin).map(([x, y]) => toScreen(x, y));
-  nodes[24] = toScreen(jawX, 168.0 + 0.9 * jawOpen);
-  nodes[25] = toScreen(-85.0, 145.0 + jawOpen);
-  const protrusionNodes: FacePose["protrusionNodes"] = [
-    { channel: 26, point: toScreen(...chin[1]), scale: 1 + dev(26) * 0.6 },
-    { channel: 27, point: toScreen(...chin[3]), scale: 1 + dev(27) * 0.6 },
-  ];
-  // Tongue channels (28/29) aren't rendered at all -- no visual anchor,
-  // per hardware review (they don't drive anything a 2D face preview shows).
+  // The jaw group (24-27) gets no anchor dots: the outline and the lower
+  // teeth ARE its in-plane representation, and 26/27 are depth-axis (see
+  // depthReadout). Tongue channels (28/29) are disabled and not rendered.
+  const depthReadout =
+    `jaw open ${Math.abs(dev(25)).toFixed(2)}  shift ${dev(24) >= 0 ? "+" : ""}${dev(24).toFixed(2)}` +
+    `  depth 26:${dev(26) >= 0 ? "+" : ""}${dev(26).toFixed(2)} 27:${dev(27) >= 0 ? "+" : ""}${dev(27).toFixed(2)}`;
 
   // --- Brows: subject-right (0/1) on screen-left, subject-left (2/3) on
   // screen-right, outer ends sitting higher. ---
   const browCurves = ([[-1, 0, 1] as const, [1, 2, 3] as const]).map(([side, innerCh, outerCh]) => {
-    const ix = side * 70.0;
-    const iy = -168.0 - 26.0 * dev(innerCh);
-    const ox = side * 130.0;
-    const oy = -180.0 - 22.0 * dev(outerCh);
+    const [rix, riy] = rest(innerCh, [side * 70.0, -168.0]);
+    const [rox, roy] = rest(outerCh, [side * 130.0, -180.0]);
+    const ix = rix;
+    const iy = riy - 26.0 * dev(innerCh);
+    const ox = rox;
+    const oy = roy - 22.0 * dev(outerCh);
     const mid: Point = [(ix + ox) / 2.0, (iy + oy) / 2.0 - 5.0];
     nodes[innerCh] = toScreen(ix, iy);
     nodes[outerCh] = toScreen(ox, oy);
@@ -306,8 +476,8 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
   const gazeY = -dev(13) * EYE_GAZE_RANGE_PX; // + = look up
 
   const eyes: FacePose["eyes"] = ([[-1, 11, 12] as const, [1, 9, 10] as const]).map(([side, upperCh, lowerCh]) => {
-    const cx = side * 80.0;
-    const cy = -110.0;
+    const cx = side * EYE_CENTER_X;
+    const cy = EYE_CENTER_Y;
     const hw = EYE_HALF_WIDTH;
     const apU = clamp(EYE_APERTURE_UPPER * (1.0 - dev(upperCh)), 0.0, 30.0);
     const apL = clamp(EYE_APERTURE_LOWER * (1.0 - dev(lowerCh)), 0.0, 22.0);
@@ -321,8 +491,10 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
       lowerEdge.push([cx + s * hw, cy + apL * bulge]);
     }
 
-    nodes[upperCh] = toScreen(cx, cy - apU);
-    nodes[lowerCh] = toScreen(cx, cy + apL);
+    const [rux, ruy] = rest(upperCh, [cx, cy - EYE_APERTURE_UPPER]);
+    const [rlx, rly] = rest(lowerCh, [cx, cy + EYE_APERTURE_LOWER]);
+    nodes[upperCh] = toScreen(rux, ruy + (EYE_APERTURE_UPPER - apU));
+    nodes[lowerCh] = toScreen(rlx, rly - (EYE_APERTURE_LOWER - apL));
 
     if (apU + apL > 4.0) {
       const aperture = [...upperEdge, ...lowerEdge.slice().reverse()].map(([x, y]) => toScreen(x, y));
@@ -334,8 +506,8 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     return { open: false as const, line: [toScreen(cx - hw, cy), toScreen(cx + hw, cy)] as [Point, Point] };
   });
 
-  nodes[8] = toScreen(gazeX, -142.0);
-  nodes[13] = toScreen(0.0, -118.0 + gazeY);
+  // 8/13 get no dots: they are rotations of the shared eye mechanism, not
+  // surface points -- the pupils are their whole representation.
 
   // --- Nose: prominent central ridge (reference photo shows a raised,
   // fairly pointed bridge, not a flat one) down to a rounded tip base. ---
@@ -347,15 +519,18 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     [0.0, -26.0],
     [26.0, -38.0 + liftL],
   ]).map(([x, y]) => toScreen(x, y));
-  nodes[5] = toScreen(96.0, -80.0 - 14.0 * dev(5));
-  nodes[6] = toScreen(-96.0, -80.0 - 14.0 * dev(6));
+  const [r5x, r5y] = rest(5, [96.0, -80.0]);
+  const [r6x, r6y] = rest(6, [-96.0, -80.0]);
+  nodes[5] = toScreen(r5x, r5y - 14.0 * dev(5));
+  nodes[6] = toScreen(r6x, r6y - 14.0 * dev(6));
 
   // --- Cheeks: tendon pulls its arc up and outward (smile apple / squint);
   // anchor sits roughly where the real rig's cheek tendon guide is. ---
   const cheekCurves = ([[1, 4] as const, [-1, 7] as const]).map(([side, channel]) => {
     const d = dev(channel);
-    const ax = side * (150.0 + 6.0 * d);
-    const ay = -40.0 - 18.0 * d;
+    const [rx, ry] = rest(channel, [side * 150.0, -40.0]);
+    const ax = rx + side * 6.0 * d;
+    const ay = ry - 18.0 * d;
     nodes[channel] = toScreen(ax, ay);
     return catmullRom([
       [side * 122.0, -95.0],
@@ -364,11 +539,16 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     ]).map(([x, y]) => toScreen(x, y));
   });
 
-  // --- Mouth ---
+  // --- Mouth. The lip ring is its own layer but still rides the jaw a
+  // little: with skin on, the lower lip sits on the jaw. The teeth do not
+  // follow the lip channels at all -- that separation is what makes "lips
+  // parted over a closed jaw" (closed teeth behind open lips) distinguishable
+  // from an open jaw (a dark gap between the tooth rows). ---
   const upLift = -0.12 * jawOpen;
   const lowDrop = 0.85 * jawOpen;
-  const pt = (channel: number, x: number, y: number, moveY: number, shiftX = 0): Point => {
-    const p: Point = [x + shiftX, y + moveY * dev(channel)];
+  const pt = (channel: number, x: number, y: number, moveY: number, shiftX = 0, followY = 0): Point => {
+    const [rx, ry] = rest(channel, [x, y]);
+    const p: Point = [rx + shiftX, ry + followY + moveY * dev(channel)];
     nodes[channel] = toScreen(...p);
     return p;
   };
@@ -387,7 +567,10 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
   const mouthCorner = (upperCh: number, lowerCh: number, side: -1 | 1): Point => {
     const lift = ((dev(upperCh) - dev(lowerCh)) / 2) * CORNER_VERTICAL_RANGE_PX;
     const outward = ((dev(upperCh) + dev(lowerCh)) / 2) * CORNER_HORIZONTAL_RANGE_PX;
-    const p: Point = [side * (106.0 + outward), 56.0 + (upLift + lowDrop) / 2 - lift];
+    // The pair shares one physical corner, so either channel's mapped anchor
+    // (upper wins) positions the rest point.
+    const [rx, ry] = rest(upperCh, rest(lowerCh, [side * 106.0, 56.0]));
+    const p: Point = [rx + side * outward, ry + (upLift + lowDrop) / 2 - lift];
     nodes[upperCh] = toScreen(...p);
     nodes[lowerCh] = toScreen(...p);
     return p;
@@ -398,24 +581,41 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
 
   const upperLip: Point[] = [
     rightCorner,
-    pt(16, -52.0, 46.0 + upLift, -14.0),
-    pt(15, 0.0, 44.0 + upLift, -12.0),
-    pt(14, 52.0, 46.0 + upLift, -14.0),
+    pt(16, -52.0, 46.0, -14.0, 0, upLift),
+    pt(15, 0.0, 44.0, -12.0, 0, upLift),
+    pt(14, 52.0, 46.0, -14.0, 0, upLift),
     leftCorner,
   ];
   const lowerLip: Point[] = [
     rightCorner,
-    pt(22, -52.0, 58.0 + lowDrop, 16.0, jawX),
-    pt(23, 0.0, 62.0 + lowDrop, 18.0, jawX),
-    pt(21, 52.0, 58.0 + lowDrop, 16.0, jawX),
+    pt(22, -52.0, 58.0, 16.0, jawX, lowDrop),
+    pt(23, 0.0, 62.0, 18.0, jawX, lowDrop),
+    pt(21, 52.0, 58.0, 16.0, jawX, lowDrop),
     leftCorner,
   ];
 
-  const mouthInterior = [...catmullRom(upperLip), ...catmullRom(lowerLip.slice().reverse())].map(([x, y]) =>
-    toScreen(x, y),
+  const upperPts = catmullRom(upperLip);
+  const lowerPts = catmullRom(lowerLip);
+  const mouthInterior = [...upperPts, ...lowerPts.slice().reverse()].map(([x, y]) => toScreen(x, y));
+  const upperLipCurve = upperPts.map(([x, y]) => toScreen(x, y));
+  const lowerLipCurve = lowerPts.map(([x, y]) => toScreen(x, y));
+
+  // Teeth, clipped to the lip opening. Upper row skull-fixed; lower row rides
+  // the rigid jaw (full open drop + lateral shift).
+  const upper = teethStrips(UPPER_TEETH_TOP, OCCLUSION_Y, upperPts, lowerPts);
+  const lower = teethStrips(
+    OCCLUSION_Y + jawOpen,
+    LOWER_TEETH_BOTTOM + jawOpen,
+    upperPts,
+    lowerPts,
+    jawX,
   );
-  const upperLipCurve = catmullRom(upperLip).map(([x, y]) => toScreen(x, y));
-  const lowerLipCurve = catmullRom(lowerLip).map(([x, y]) => toScreen(x, y));
+  const teethPolygons = [...upper.strips, ...lower.strips].map((strip) =>
+    strip.map(([x, y]) => toScreen(x, y)),
+  );
+  const teethSeparators = [...upper.separators, ...lower.separators].map(
+    ([a, b]): [Point, Point] => [toScreen(...a), toScreen(...b)],
+  );
 
   return {
     headArc,
@@ -427,10 +627,12 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     cheekCurves,
     eyes,
     mouthInterior,
+    teethPolygons,
+    teethSeparators,
     upperLipCurve,
     lowerLipCurve,
     nodes,
-    protrusionNodes,
+    depthReadout,
   };
 }
 
@@ -497,27 +699,30 @@ export const FacePreview = memo(function FacePreview({ channels, applied }: Face
       )}
 
       <polygon points={pointsToSvg(pose.mouthInterior)} fill={MOUTH_INNER} />
+      {pose.teethPolygons.map((strip, i) => (
+        <polygon
+          key={`teeth-${i}`}
+          points={pointsToSvg(strip)}
+          fill={TOOTH_COLOR}
+          stroke={TOOTH_EDGE}
+          strokeWidth={1}
+        />
+      ))}
+      {pose.teethSeparators.map(([a, b], i) => (
+        <line key={`tooth-sep-${i}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke={TOOTH_EDGE} strokeWidth={1} />
+      ))}
       <polyline points={pointsToSvg(pose.upperLipCurve)} fill="none" stroke={LIP_COLOR} strokeWidth={4} />
       <polyline points={pointsToSvg(pose.lowerLipCurve)} fill="none" stroke={LIP_COLOR} strokeWidth={4} />
 
       {Object.entries(pose.nodes).map(([channelStr, [x, y]]) => {
         const channel = Number(channelStr);
+        if (!DOT_CHANNELS.has(channel)) return null;
         return <circle key={channel} cx={x} cy={y} r={4.5} fill={GROUP_COLOR[channelGroup(channel)]} />;
       })}
 
-      {/* Abstract stand-in for front-back jaw protrusion (26/27): a 2D
-          frontal view can't show depth, so these read via dot size instead
-          of a (fake) shape change. Revisit if/when a 3/4-view render exists. */}
-      {pose.protrusionNodes.map(({ channel, point: [x, y], scale }) => (
-        <circle
-          key={channel}
-          cx={x}
-          cy={y}
-          r={4.5 * Math.max(0.4, scale)}
-          fill={GROUP_COLOR.jaw}
-          opacity={0.85}
-        />
-      ))}
+      <text x={12} y={VIEW_HEIGHT - 14} fill={HUD_TEXT} fontSize={15} fontFamily="monospace">
+        {pose.depthReadout}
+      </text>
     </svg>
   );
 });

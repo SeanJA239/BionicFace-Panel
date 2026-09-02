@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { INSET_HEIGHT, INSET_WIDTH, profileGeometry, type ProfileGeometry } from "./faceProfile";
 import photoAnchorsFile from "../docs/hardware/face_anchors.json";
 import type { MotorChannel } from "./tauri";
 
@@ -111,6 +112,7 @@ const MOUTH_INNER = "#241218";
 const TOOTH_COLOR = "#e0e2db";
 const TOOTH_EDGE = "#949894";
 const HUD_TEXT = "#c8dce6";
+const INSET_FRAME = "#69707c";
 
 type ChannelGroup = "brow" | "tendon" | "eye" | "mouth" | "jaw" | "neck";
 
@@ -377,6 +379,7 @@ export type FacePose = {
   // straight-on 2D view can't show. Deliberately not drawn as a (fake) shape
   // change; this readout is their whole representation.
   depthReadout: string;
+  profile: ProfileGeometry;
 };
 
 /** Pure geometry computation, kept separate from the SVG markup below so it
@@ -418,6 +421,16 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
   // neutral in either direction counts as open.
   const jawOpen = Math.abs(dev(25)) * JAW_OPEN_RANGE_PX;
   const jawX = dev(24) * JAW_SHIFT_RANGE_PX;
+
+  // Side-view inset for the depth-axis motions (see faceProfile.ts). Corner
+  // choice: the only HUD text is the depth readout at bottom-left and the
+  // face stays within x 270..630, so top-right is quiet.
+  const profile = profileGeometry(
+    Math.abs(dev(25)),
+    dev(26),
+    (dev(30) + dev(31)) / 2,
+    [VIEW_WIDTH - INSET_WIDTH - 12, 12],
+  );
 
   // --- Neck (screen space, not tilted -- the head tilts on top of it) ---
   const neckLines: FacePose["neckLines"] = [];
@@ -633,6 +646,7 @@ export function computeFacePose(channels: MotorChannel[], applied: number[]): Fa
     lowerLipCurve,
     nodes,
     depthReadout,
+    profile,
   };
 }
 
@@ -723,6 +737,38 @@ export const FacePreview = memo(function FacePreview({ channels, applied }: Face
       <text x={12} y={VIEW_HEIGHT - 14} fill={HUD_TEXT} fontSize={15} fontFamily="monospace">
         {pose.depthReadout}
       </text>
+
+      <g>
+        <rect
+          x={VIEW_WIDTH - INSET_WIDTH - 12}
+          y={12}
+          width={INSET_WIDTH}
+          height={INSET_HEIGHT}
+          fill="none"
+          stroke={INSET_FRAME}
+          strokeWidth={1}
+        />
+        <text
+          x={VIEW_WIDTH - INSET_WIDTH - 7}
+          y={26}
+          fill={HUD_TEXT}
+          fontSize={12}
+          fontFamily="monospace"
+          fontWeight="bold"
+        >
+          SIDE
+        </text>
+        {pose.profile.neck.map(([a, b], i) => (
+          <line key={`p-neck-${i}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke={OUTLINE_COLOR} strokeWidth={2} />
+        ))}
+        <polyline points={pointsToSvg(pose.profile.skull)} fill="none" stroke={OUTLINE_COLOR} strokeWidth={2} />
+        <polyline points={pointsToSvg(pose.profile.jaw)} fill="none" stroke={OUTLINE_COLOR} strokeWidth={2} />
+        <polygon points={pointsToSvg(pose.profile.upperTeeth)} fill={TOOTH_COLOR} stroke={TOOTH_EDGE} strokeWidth={1} />
+        <polygon points={pointsToSvg(pose.profile.lowerTeeth)} fill={TOOTH_COLOR} stroke={TOOTH_EDGE} strokeWidth={1} />
+        {pose.profile.toothSeparators.map(([a, b], i) => (
+          <line key={`p-sep-${i}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke={TOOTH_EDGE} strokeWidth={1} />
+        ))}
+      </g>
     </svg>
   );
 });

@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 import pygame
+from face_profile import INSET_HEIGHT, INSET_WIDTH, profile_geometry
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = ROOT / "src-tauri" / "config" / "motor_config.json"
@@ -557,6 +558,7 @@ class FaceRenderer:
         self._draw_nose(surface, angles, to_screen, nodes)
         self._draw_cheeks(surface, angles, to_screen, nodes)
         self._draw_mouth(surface, angles, jaw_open, jaw_x, to_screen, nodes)
+        self._draw_profile_inset(surface, angles)
 
         if self.show_nodes:
             self._draw_nodes(surface, nodes)
@@ -797,6 +799,38 @@ class FaceRenderer:
 
         self._curve(surface, upper, to_screen, LIP_COLOR, 4)
         self._curve(surface, lower, to_screen, LIP_COLOR, 4)
+
+    # Inset corner: top-left holds FPS, bottom-left the last-frame line and
+    # the depth readout, bottom-right the SIGNAL LOST banner -- top-right is
+    # the only quiet corner, below the frame/src line (y < 32).
+    PROFILE_ORIGIN = (SCREEN_SIZE[0] - int(INSET_WIDTH) - 12, 36)
+
+    def _draw_profile_inset(self, surface, angles) -> None:
+        """Side view for the depth-axis motions; see face_profile.py."""
+        geometry = profile_geometry(
+            abs(self.dev(25, angles)),
+            self.dev(26, angles),
+            (self.dev(30, angles) + self.dev(31, angles)) / 2.0,
+            self.PROFILE_ORIGIN,
+        )
+        ox, oy = self.PROFILE_ORIGIN
+        pygame.draw.rect(
+            surface,
+            DISABLED_NODE_COLOR,
+            pygame.Rect(ox, oy, int(INSET_WIDTH), int(INSET_HEIGHT)),
+            1,
+        )
+        for a, b in geometry["neck"]:
+            pygame.draw.line(surface, OUTLINE_COLOR, a, b, 2)
+        pygame.draw.aalines(surface, OUTLINE_COLOR, False, geometry["skull"])
+        pygame.draw.aalines(surface, OUTLINE_COLOR, False, geometry["jaw"])
+        for key in ("upper_teeth", "lower_teeth"):
+            pygame.draw.polygon(surface, TOOTH_COLOR, geometry[key])
+            pygame.draw.polygon(surface, TOOTH_EDGE, geometry[key], 1)
+        for a, b in geometry["tooth_separators"]:
+            pygame.draw.line(surface, TOOTH_EDGE, a, b, 1)
+        label = self.font_small.render("SIDE", True, HUD_COLOR)
+        surface.blit(label, (ox + 5, oy + 3))
 
     def _draw_nodes(self, surface, nodes: dict[int, tuple[int, int]]) -> None:
         for channel_id, (x, y) in nodes.items():

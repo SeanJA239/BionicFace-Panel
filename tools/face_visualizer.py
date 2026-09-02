@@ -127,6 +127,14 @@ MIRROR_PAIRS: tuple[tuple[int, int], ...] = (
     (17, 19),
     (18, 20),
     (22, 21),
+    # Scale-sharing ONLY, not in MIRRORED_CHANNELS: the neck pair's sign is
+    # handled by the dev(30) - dev(31) difference form, but the driver commands
+    # pitch/roll in equal DEGREES on both servos, and their neutrals sit
+    # asymmetrically in their ranges (ch30 largest travel 15 deg, ch31 20.5)
+    # since ch31's measured neutral moved to 95.5. Without one shared scale an
+    # equal-degree nod produced unequal devs -- a spurious ~0.085 tilt in the
+    # front view and an underestimated pitch in the side inset.
+    (31, 30),
 )
 
 

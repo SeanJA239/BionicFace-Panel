@@ -62,7 +62,10 @@ const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
 //   otherwise.
 const LAUGH_CYCLES: usize = 3;
 const LAUGH_PHASE_DWELL: Duration = Duration::from_millis(400);
-const LAUGH_NECK_LIFT_DEG: f32 = 8.0;
+// 11 of the 11.5 deg ch30 has above neutral -- the binding side of the nod
+// differential (ch31 has 20.5 below). Going bigger means re-measuring whether
+// ch30's max of 105 is a real mechanical limit.
+const LAUGH_NECK_LIFT_DEG: f32 = 11.0;
 const LAUGH_JAW_OPEN_DEG: f32 = 7.0;
 const JAW_RIGHT_UPPER_MOTOR: usize = 25;
 const JAW_LEFT_UPPER_MOTOR: usize = 32;
@@ -2982,7 +2985,7 @@ mod tests {
         channels[32] = ch_with_id(32, 80.0, 100.0, 96.5);
 
         let open = laugh_phase_targets(&channels, true);
-        let expected = [(30, 101.5), (31, 87.5), (25, 109.5), (32, 89.5)];
+        let expected = [(30, 104.5), (31, 84.5), (25, 109.5), (32, 89.5)];
         for ((motor_id, norm), (expected_id, expected_deg)) in open.iter().zip(expected) {
             assert_eq!(*motor_id, expected_id);
             approx(channels[*motor_id].norm_to_applied(*norm), expected_deg);

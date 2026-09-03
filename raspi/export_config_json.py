@@ -32,7 +32,11 @@ def build_channel(module, motor_id: int) -> dict:
     disabled_motors = set(getattr(module, "DISABLED_MOTORS", []))
     board_addresses = list(getattr(module, "BOARD_ADDRESSES", [0x40, 0x41]))
 
-    board, channel = motor_map[motor_id]
+    mapping = motor_map[motor_id]
+    # Retired channels (mapping None) keep their id slot but carry sentinel
+    # address 0 (real boards are 0x40/0x41) and are forced disabled.
+    retired = mapping is None
+    board, channel = (0, 0) if retired else mapping
     min_applied, max_applied = limits.get(motor_id, (0, 180))
     offset = float(offsets.get(motor_id, 0))
     neutral_applied = float(
@@ -40,14 +44,14 @@ def build_channel(module, motor_id: int) -> dict:
     )
     neutral_applied = clamp(neutral_applied, float(min_applied), float(max_applied))
     neutral_logical = neutral_applied - offset
-    enabled = motor_id not in disabled_motors
+    enabled = (motor_id not in disabled_motors) and not retired
 
     return {
         "id": motor_id,
         "name": names.get(motor_id, f"motor_{motor_id:02d}"),
         "board": int(board),
         "channel": int(channel),
-        "boardAddress": board_addresses[int(board)],
+        "boardAddress": 0 if retired else board_addresses[int(board)],
         "minApplied": float(min_applied),
         "maxApplied": float(max_applied),
         "offset": offset,

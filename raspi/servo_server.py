@@ -48,7 +48,10 @@ def build_kits(module) -> dict[int, ServoKit]:
         for index, address in enumerate(board_addresses)
     }
 
-    for motor_id, (board, channel) in motor_map.items():
+    for motor_id, mapping in motor_map.items():
+        if mapping is None:  # retired channel, no hardware behind it
+            continue
+        board, channel = mapping
         max_limit = int(motor_limits.get(motor_id, (0, 180))[1])
         kits[board].servo[channel].actuation_range = max(180, max_limit)
 
@@ -99,7 +102,10 @@ def apply_angles(
     for motor_id, angle in enumerate(angles):
         if last_angles[motor_id] == angle:
             continue
-        board, channel = motor_map[motor_id]
+        mapping = motor_map[motor_id]
+        if mapping is None:  # retired channel, no hardware behind it
+            continue
+        board, channel = mapping
         kits[board].servo[channel].angle = angle
         last_angles[motor_id] = angle
 

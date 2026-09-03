@@ -106,8 +106,13 @@ MOTOR_MAP = {
     25: (1, 11),  # KS3518: 1 'jaw_right_upper'
     26: (1, 12),  # mouth_MG90S: 2 'jaw_right_lower'
     27: (1, 13),  # mouth_GUOHUAA0090: 1 'jaw_left'
-    28: (1, 14),  # mouth_MG90S: 12 'tongue_upper'
-    29: (1, 15),  # mouth_MG90S: 21 'tongue_lower'
+    # Tongue servos removed 2026-09-03 -- the feature is dropped and slot
+    # (1, 14) is rewired to ch32 jaw_left_upper; (1, 15) is free. None means
+    # retired: the executor skips the write, the exporter emits a disabled
+    # channel with sentinel address 0. Ids stay because every array in the
+    # system is index-addressed.
+    28: None,  # was tongue_upper
+    29: None,  # was tongue_lower
     # neck_rigid
     30: (0, 14),  # neck_KS3518: 1 'neck_left'
     31: (0, 15),  # neck_KS3518: 2 'neck_right'

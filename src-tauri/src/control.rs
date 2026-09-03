@@ -67,6 +67,10 @@ const LAUGH_PHASE_DWELL: Duration = Duration::from_millis(400);
 // ch30's max of 105 is a real mechanical limit.
 const LAUGH_NECK_LIFT_DEG: f32 = 11.0;
 const LAUGH_JAW_OPEN_DEG: f32 = 7.0;
+// How far past neutral the jaws bite together on the close phase. Capped by
+// ch32's temporary (80,100) limits -- only 3.5 deg above its 96.5 neutral --
+// raise once the real travel is measured and the window widened.
+const LAUGH_JAW_BITE_DEG: f32 = 3.0;
 const JAW_RIGHT_UPPER_MOTOR: usize = 25;
 const JAW_LEFT_UPPER_MOTOR: usize = 32;
 
@@ -937,16 +941,17 @@ impl ControlService {
         Ok(self.runtime_state().await)
     }
 
-    async fn set_laugh_targets(&self, open: bool) {
+    async fn set_laugh_targets(&self, phase: LaughPhase) {
         let mut state = self.state.lock().await;
-        let targets = laugh_phase_targets(&state.channels, open);
+        let targets = laugh_phase_targets(&state.channels, phase);
         for (motor_id, norm) in targets {
             apply_motor_target_norm(&mut state, motor_id, norm);
         }
     }
 
     /// Laugh: throw the head back while both jaw-upper motors open, dwell,
-    /// come back to base, LAUGH_CYCLES times. Same shape as `nod`: targets are
+    /// bite the jaws slightly past neutral (head level), dwell, LAUGH_CYCLES
+    /// times, then land on the base pose. Same shape as `nod`: targets are
     /// set over time and the heartbeat interpolates + dispatches them, and the
     /// same manual-writability guard applies.
     pub async fn laugh(&self) -> Result<RuntimeState> {
@@ -957,11 +962,12 @@ impl ControlService {
         }
 
         for _ in 0..LAUGH_CYCLES {
-            self.set_laugh_targets(true).await;
+            self.set_laugh_targets(LaughPhase::Open).await;
             tokio::time::sleep(LAUGH_PHASE_DWELL).await;
-            self.set_laugh_targets(false).await;
+            self.set_laugh_targets(LaughPhase::Bite).await;
             tokio::time::sleep(LAUGH_PHASE_DWELL).await;
         }
+        self.set_laugh_targets(LaughPhase::Base).await;
 
         Ok(self.runtime_state().await)
     }
@@ -1391,26 +1397,46 @@ fn normalize_expression_presets(
 /// frontend also greys out its controls, but this backend guard is the real
 /// enforcement per the architecture's "no process bypasses ControlService"
 /// rule extended to arbitration between command sources.
-/// One laugh phase's (motor_id, norm) targets. `open` selects the
-/// head-back-and-jaws-open pose; false returns every involved motor to its
-/// neutral. Offsets are specified in degrees around each motor's neutral and
-/// converted through that channel's own bipolar norm, so both neck motors move
-/// the same physical amount despite their asymmetric neutrals.
-fn laugh_phase_targets(channels: &[MotorChannel], open: bool) -> [(usize, f32); 4] {
-    let target = |motor_id: usize, delta_deg: f32| {
+/// The three poses a laugh cycles through: head back with jaws open, jaws
+/// biting slightly past neutral (teeth together, head level), and the base
+/// pose the action must end on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaughPhase {
+    Open,
+    Bite,
+    Base,
+}
+
+/// One laugh phase's (motor_id, norm) targets. Offsets are specified in
+/// degrees around each motor's neutral and converted through that channel's
+/// own bipolar norm, so both neck motors move the same physical amount despite
+/// their asymmetric neutrals.
+fn laugh_phase_targets(channels: &[MotorChannel], phase: LaughPhase) -> [(usize, f32); 4] {
+    let target = |motor_id: usize, open_deg: f32, bite_deg: f32| {
         let channel = &channels[motor_id];
-        let norm = if open {
-            channel.applied_to_norm(channel.neutral_applied + delta_deg)
-        } else {
-            0.0
+        let delta = match phase {
+            LaughPhase::Open => open_deg,
+            LaughPhase::Bite => bite_deg,
+            LaughPhase::Base => 0.0,
         };
-        (motor_id, norm)
+        (
+            motor_id,
+            channel.applied_to_norm(channel.neutral_applied + delta),
+        )
     };
     [
-        target(NECK_UP_MOTOR, LAUGH_NECK_LIFT_DEG),
-        target(NECK_MIRROR_MOTOR, -LAUGH_NECK_LIFT_DEG),
-        target(JAW_RIGHT_UPPER_MOTOR, LAUGH_JAW_OPEN_DEG),
-        target(JAW_LEFT_UPPER_MOTOR, -LAUGH_JAW_OPEN_DEG),
+        target(NECK_UP_MOTOR, LAUGH_NECK_LIFT_DEG, 0.0),
+        target(NECK_MIRROR_MOTOR, -LAUGH_NECK_LIFT_DEG, 0.0),
+        target(
+            JAW_RIGHT_UPPER_MOTOR,
+            LAUGH_JAW_OPEN_DEG,
+            -LAUGH_JAW_BITE_DEG,
+        ),
+        target(
+            JAW_LEFT_UPPER_MOTOR,
+            -LAUGH_JAW_OPEN_DEG,
+            LAUGH_JAW_BITE_DEG,
+        ),
     ]
 }
 
@@ -2984,14 +3010,22 @@ mod tests {
         channels[31] = ch_with_id(31, 75.0, 105.0, 95.5);
         channels[32] = ch_with_id(32, 80.0, 100.0, 96.5);
 
-        let open = laugh_phase_targets(&channels, true);
+        let open = laugh_phase_targets(&channels, LaughPhase::Open);
         let expected = [(30, 104.5), (31, 84.5), (25, 109.5), (32, 89.5)];
         for ((motor_id, norm), (expected_id, expected_deg)) in open.iter().zip(expected) {
             assert_eq!(*motor_id, expected_id);
             approx(channels[*motor_id].norm_to_applied(*norm), expected_deg);
         }
 
-        let base = laugh_phase_targets(&channels, false);
+        // Bite: neck level, both jaws 3 deg past neutral towards each other.
+        let bite = laugh_phase_targets(&channels, LaughPhase::Bite);
+        let expected_bite = [(30, 93.5), (31, 95.5), (25, 99.5), (32, 99.5)];
+        for ((motor_id, norm), (expected_id, expected_deg)) in bite.iter().zip(expected_bite) {
+            assert_eq!(*motor_id, expected_id);
+            approx(channels[*motor_id].norm_to_applied(*norm), expected_deg);
+        }
+
+        let base = laugh_phase_targets(&channels, LaughPhase::Base);
         for (motor_id, norm) in base {
             approx(
                 channels[motor_id].norm_to_applied(norm),

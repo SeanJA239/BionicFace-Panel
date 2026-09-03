@@ -1,0 +1,10 @@
+{
+  "id": "demo_wink_loop",
+  "label": "演示序列2：循环眨眼",
+  "steps": [
+    { "preset": "neutral", "intensity": 1.0, "transition_ms": 300, "easing": "linear", "hold_ms": 800 },
+    { "preset": "wink", "intensity": 1.0, "transition_ms": 150, "easing": "ease_in_out_cubic", "hold_ms": 300 },
+    { "preset": "neutral", "intensity": 1.0, "transition_ms": 200, "easing": "min_jerk", "hold_ms": 2000 }
+  ],
+  "loop": true
+}

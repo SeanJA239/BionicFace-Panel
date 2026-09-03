@@ -22,6 +22,8 @@ export type TransportStatus = {
   heartbeatHz: number;
 };
 
+export type ControlSource = "manual" | "external" | "idle";
+
 export type RuntimeState = {
   endpoint: string | null;
   heartbeatHz: number;
@@ -29,6 +31,35 @@ export type RuntimeState = {
   targetLogical: number[];
   targetApplied: number[];
   currentApplied: number[];
+  // Bipolar normalized (-1..1) views, derived per channel (phase 1).
+  targetNorm: number[];
+  currentNorm: number[];
+  controlSource: ControlSource;
+  idleBehaviorEnabled: boolean;
+};
+
+export type ExternalInputStatus = {
+  port: number;
+  active: boolean;
+  lastSeq: number | null;
+  fps: number;
+  timeoutMs: number;
+  controlSource: ControlSource;
+};
+
+export type SequenceSummary = {
+  id: string;
+  label: string;
+  stepCount: number;
+  loopPlayback: boolean;
+};
+
+export type SequencePlaybackStatus = {
+  playing: boolean;
+  sequenceId: string | null;
+  label: string | null;
+  stepIndex: number | null;
+  totalSteps: number | null;
 };
 
 export type UdpControlFrame = {
@@ -81,6 +112,14 @@ export async function setAllTargets(logicalValues: number[]): Promise<RuntimeSta
   return safeInvoke("set_all_targets", { logicalValues });
 }
 
+export async function setMotorTargetNorm(motorId: number, norm: number): Promise<RuntimeState> {
+  return safeInvoke("set_motor_target_norm", { motorId, norm });
+}
+
+export async function setAllTargetsNorm(normValues: number[]): Promise<RuntimeState> {
+  return safeInvoke("set_all_targets_norm", { normValues });
+}
+
 export async function centerAll(): Promise<RuntimeState> {
   return safeInvoke("center_all");
 }
@@ -89,12 +128,51 @@ export async function applyExpressionPreset(presetId: string): Promise<RuntimeSt
   return safeInvoke("apply_expression_preset", { presetId });
 }
 
+export async function applyExpressionPresetScaled(
+  presetId: string,
+  intensity: number,
+): Promise<RuntimeState> {
+  return safeInvoke("apply_expression_preset_scaled", { presetId, intensity });
+}
+
 export async function nod(): Promise<RuntimeState> {
   return safeInvoke("nod");
 }
 
+export async function listSequences(): Promise<SequenceSummary[]> {
+  return safeInvoke("list_sequences");
+}
+
+export async function getSequencePlaybackStatus(): Promise<SequencePlaybackStatus> {
+  return safeInvoke("get_sequence_playback_status");
+}
+
+export async function playSequence(sequenceId: string): Promise<void> {
+  return safeInvoke("play_sequence", { sequenceId });
+}
+
+export async function stopSequence(): Promise<RuntimeState> {
+  return safeInvoke("stop_sequence");
+}
+
+export async function wink(): Promise<RuntimeState> {
+  return safeInvoke("wink");
+}
+
 export async function getRuntimeState(): Promise<RuntimeState> {
   return safeInvoke("get_runtime_state");
+}
+
+export async function getExternalInputStatus(): Promise<ExternalInputStatus> {
+  return safeInvoke("get_external_input_status");
+}
+
+export async function forceManualControl(): Promise<RuntimeState> {
+  return safeInvoke("force_manual_control");
+}
+
+export async function setIdleBehaviorEnabled(enabled: boolean): Promise<RuntimeState> {
+  return safeInvoke("set_idle_behavior_enabled", { enabled });
 }
 
 export async function getLastFrame(): Promise<UdpControlFrame | null> {

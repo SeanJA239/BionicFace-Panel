@@ -11,6 +11,28 @@
 BOARD_ADDRESSES = [0x40, 0x41]
 UDP_PORT = 6000
 
+# External coefficient-stream input (see control.rs's ControlService): a
+# second UDP listener the PC side runs to accept driver processes (e.g.
+# tools/mediapipe_driver.py) feeding normalized [0,1] coefficients,
+# arbitrated against manual (slider/preset/sequence) control.
+EXTERNAL_INPUT_PORT = 6100
+EXTERNAL_INPUT_TIMEOUT_MS = 500
+
+# Idle behavior (see control.rs's ControlSource::Idle): when Manual and
+# stationary for idle_after_seconds with nothing else animating, low-amplitude
+# noise is added on the listed channels (in their own norm space) plus
+# periodic blinking on the eyelid channels (9/10/11/12, not configurable here).
+IDLE_BEHAVIOR = {
+    "enabled": True,
+    "idle_after_seconds": 3.0,
+    "noise_channel_ids": [0, 1, 2, 3, 8, 13, 30, 31],
+    "noise_amplitude": 0.03,
+    "noise_freq_min_hz": 0.2,
+    "noise_freq_max_hz": 0.5,
+    "blink_min_interval_seconds": 2.0,
+    "blink_max_interval_seconds": 6.0,
+}
+
 MOTOR_NAMES = {
     0: "eyebrow_right_inner",
     1: "eyebrow_right_outer",
@@ -44,6 +66,7 @@ MOTOR_NAMES = {
     29: "tongue_lower",
     30: "neck_left",
     31: "neck_right",
+    32: "jaw_left_upper",
 }
 
 # Channels listed here stay in the 32-channel protocol but are held at their
@@ -83,11 +106,17 @@ MOTOR_MAP = {
     25: (1, 11),  # KS3518: 1 'jaw_right_upper'
     26: (1, 12),  # mouth_MG90S: 2 'jaw_right_lower'
     27: (1, 13),  # mouth_GUOHUAA0090: 1 'jaw_left'
-    28: (1, 14),  # mouth_MG90S: 12 'tongue_upper'
-    29: (1, 15),  # mouth_MG90S: 21 'tongue_lower'
+    # Tongue servos removed 2026-09-03 -- the feature is dropped and slot
+    # (1, 14) is rewired to ch32 jaw_left_upper; (1, 15) is free. None means
+    # retired: the executor skips the write, the exporter emits a disabled
+    # channel with sentinel address 0. Ids stay because every array in the
+    # system is index-addressed.
+    28: None,  # was tongue_upper
+    29: None,  # was tongue_lower
     # neck_rigid
     30: (0, 14),  # neck_KS3518: 1 'neck_left'
     31: (0, 15),  # neck_KS3518: 2 'neck_right'
+    32: (1, 14),  # jaw_left_upper, added 2026-09-03
 }
 
 MOTOR_LIMITS = {
@@ -99,26 +128,31 @@ MOTOR_LIMITS = {
     5: (75, 105),  # 90-zero tendon
     6: (75, 105),  # 90-zero tendon
     7: (75, 135),  # 90-zero tendon
-    8: (75, 135),  # 90-zero
-    9: (35, 135),
+    # Measured on hardware 2026-08-29 (docs/hardware/CHANNEL_VERIFICATION.md):
+    # eyes look straight ahead at applied 110 (logical 105), and travel above
+    # that is a mechanical dead zone -- the linkage stops moving. Max is pinned
+    # at straight-ahead so sampled commands never land in the dead zone; the
+    # channel is one-sided, gaze deviates rightward only.
+    8: (75, 110),  # 90-zero
+    9: (35, 150),
     10: (60, 175),
-    11: (60, 110),
+    11: (45, 110),
     12: (0, 135),
     13: (30, 135),
     14: (45, 105),  # 90-mid
     15: (90, 150),  # 90-zero
     16: (75, 135),  # 90-mid
-    17: (0, 80),  # 90-mid
+    17: (0, 90),  # 90-mid
     18: (90, 130),  # 90-mid
     19: (70, 170),  # 90-mid
-    20: (90, 130),  # 90-mid
+    20: (90, 150),  # 90-mid
     21: (80, 120),  # 90-rand
-    22: (90, 130),  # 90-rand
+    22: (90, 120),  # 90-rand
     23: (15, 125),  # 90-mid
     24: (60, 120),  # 90-zero-r
     25: (75, 110),
     26: (60, 135),
-    27: (60, 135),
+    27: (45, 120),
     28: (75, 105),  # 90-mid-r
     29: (75, 105),
     # Neck structure is back in service but not yet calibrated end-to-end;
@@ -126,6 +160,9 @@ MOTOR_LIMITS = {
     # range-of-motion pass is done.
     30: (75, 105),
     31: (75, 105),
+    # Fresh servo, travel unmeasured -- deliberately tight window around the
+    # assumed center; widen from jog measurements (ledger).
+    32: (80, 100),
 }
 
 MOTOR_OFFSET = {
@@ -150,7 +187,7 @@ MOTOR_INITIAL_APPLIED = {
     5: 90.0,
     6: 90.0,
     7: 90.0,
-    8: 90.0,
+    8: 110.0,
     9: 118.0,
     10: 108.5,
     11: 89.0,
@@ -167,13 +204,14 @@ MOTOR_INITIAL_APPLIED = {
     22: 90.0,
     23: 85.0,
     24: 89.5,
-    25: 110.0,
-    26: 94.0,
-    27: 95.0,
+    25: 93.5,
+    26: 135.0,
+    27: 75.0,
     28: 79.5,
     29: 79.0,
     30: 90.0,
-    31: 90.0,
+    31: 95.5,  # measured level head 2026-08-29 (ledger)
+    32: 90.0,
 }
 
 # Jaw linkage compensation.

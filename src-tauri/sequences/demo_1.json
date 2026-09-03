@@ -1,0 +1,11 @@
+{
+  "id": "demo_1",
+  "label": "演示序列1：中性→惊讶→喜悦→回中性",
+  "steps": [
+    { "preset": "neutral", "intensity": 1.0, "transition_ms": 400, "easing": "min_jerk", "hold_ms": 400 },
+    { "preset": "惊讶", "intensity": 1.0, "transition_ms": 500, "easing": "min_jerk", "hold_ms": 1200 },
+    { "preset": "喜悦", "intensity": 0.8, "transition_ms": 700, "easing": "ease_in_out_cubic", "hold_ms": 1500 },
+    { "preset": "neutral", "intensity": 1.0, "transition_ms": 600, "easing": "min_jerk", "hold_ms": 600 }
+  ],
+  "loop": false
+}

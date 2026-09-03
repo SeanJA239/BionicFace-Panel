@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-MOTOR_COUNT = 32
+MOTOR_COUNT = 33
 # Matches tools/check_neutral.py's tolerance so the preview colours agree with
 # what that tool reports as off.
 NEUTRAL_TOLERANCE = 0.05

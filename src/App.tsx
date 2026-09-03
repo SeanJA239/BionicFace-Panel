@@ -31,7 +31,7 @@ import {
 import { FacePreview } from "./FacePreview";
 
 const DEFAULT_ENDPOINT = "192.168.1.101:6000";
-const MOTOR_COUNT = 32;
+const MOTOR_COUNT = 33;
 // Slider drags fire change events far faster than the IPC round-trip is
 // worth; pending values are coalesced and sent at most ~30 times per second.
 const SEND_INTERVAL_MS = 33;
@@ -361,7 +361,7 @@ function App() {
       <section className="hero-card">
         <div>
           <p className="eyebrow">BionicFace Calibration Console</p>
-          <h1>32-channel direct motor control panel</h1>
+          <h1>{MOTOR_COUNT}-channel direct motor control panel</h1>
           <p className="lede">
             React slider values are sent through Tauri invoke. Rust performs offset compensation,
             logical clamp, 100Hz interpolation, and UDP JSON dispatch to the Raspberry Pi dumb
@@ -508,7 +508,7 @@ function App() {
             <div className="panel-header">
               <div>
                 <p className="panel-kicker">Live Preview</p>
-                <h2>32-channel face render</h2>
+                <h2>{MOTOR_COUNT}-channel face render</h2>
               </div>
               <p className="panel-note">
                 {connected

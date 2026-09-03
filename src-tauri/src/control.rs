@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-const MOTOR_COUNT: usize = 32;
+const MOTOR_COUNT: usize = 33;
 const HEARTBEAT_HZ: u64 = 100;
 const DEFAULT_EXTERNAL_INPUT_PORT: u16 = 6100;
 const DEFAULT_EXTERNAL_INPUT_TIMEOUT_MS: u64 = 500;

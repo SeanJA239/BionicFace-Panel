@@ -37,7 +37,9 @@ def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
-def applied_to_norm(applied: float, min_applied: float, max_applied: float, neutral_applied: float) -> float:
+def applied_to_norm(
+    applied: float, min_applied: float, max_applied: float, neutral_applied: float
+) -> float:
     """Mirrors MotorChannel::applied_to_norm in control.rs exactly."""
     applied = clamp(applied, min_applied, max_applied)
     if applied >= neutral_applied:
@@ -49,7 +51,9 @@ def applied_to_norm(applied: float, min_applied: float, max_applied: float, neut
     return clamp(norm, -1.0, 1.0)
 
 
-def norm_to_applied(norm: float, min_applied: float, max_applied: float, neutral_applied: float) -> float:
+def norm_to_applied(
+    norm: float, min_applied: float, max_applied: float, neutral_applied: float
+) -> float:
     """Mirrors MotorChannel::norm_to_applied in control.rs exactly."""
     norm = clamp(norm, -1.0, 1.0)
     if norm >= 0.0:
@@ -114,26 +118,41 @@ def main() -> None:
             norm = applied_to_norm(clamped, min_applied, max_applied, neutral_applied)
             norm_values.append(norm)
 
-            reconstructed = norm_to_applied(norm, min_applied, max_applied, neutral_applied)
+            reconstructed = norm_to_applied(
+                norm, min_applied, max_applied, neutral_applied
+            )
             if clamped == angle and abs(reconstructed - angle) >= 0.5:
-                reconstruction_errors.append((preset["label"], name, angle, reconstructed))
+                reconstruction_errors.append(
+                    (preset["label"], name, angle, reconstructed)
+                )
 
-        out_presets.append({"id": preset["id"], "label": preset["label"], "norm": norm_values})
+        out_presets.append(
+            {"id": preset["id"], "label": preset["label"], "norm": norm_values}
+        )
 
     if clamp_warnings:
-        print(f"WARNING: {len(clamp_warnings)} channel(s) were out of MOTOR_LIMITS range and got clamped:")
+        print(
+            f"WARNING: {len(clamp_warnings)} channel(s) were out of MOTOR_LIMITS range and got clamped:"
+        )
         for label, name, orig, clamped in clamp_warnings:
             print(f"  preset={label!r} channel={name!r} orig={orig} clamped={clamped}")
 
     if reconstruction_errors:
-        print(f"WARNING: {len(reconstruction_errors)} in-range channel(s) failed the <0.5deg round-trip check:")
+        print(
+            f"WARNING: {len(reconstruction_errors)} in-range channel(s) failed the <0.5deg round-trip check:"
+        )
         for label, name, orig, reconstructed in reconstruction_errors:
-            print(f"  preset={label!r} channel={name!r} orig={orig} reconstructed={reconstructed}")
+            print(
+                f"  preset={label!r} channel={name!r} orig={orig} reconstructed={reconstructed}"
+            )
     else:
-        print("Round-trip check passed: every in-range channel reconstructs within 0.5deg.")
+        print(
+            "Round-trip check passed: every in-range channel reconstructs within 0.5deg."
+        )
 
     OUTPUT_PATH.write_text(
-        json.dumps({"presets": out_presets}, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps({"presets": out_presets}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
     print(f"Wrote {OUTPUT_PATH} ({len(out_presets)} presets)")
 

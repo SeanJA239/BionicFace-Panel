@@ -163,7 +163,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    last_angles: list[float | None] = [None] * 32
+    last_angles: list[float | None] = [None] * 33
 
     while not stop:
         try:
@@ -176,7 +176,7 @@ def main() -> None:
         try:
             payload = json.loads(packet.decode("utf-8"))
             angles = payload["angles"]
-            if len(angles) != 32:
+            if len(angles) != 33:
                 continue
             if reporter is not None:
                 reporter.record(payload)

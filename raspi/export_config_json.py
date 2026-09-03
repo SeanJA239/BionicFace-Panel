@@ -100,9 +100,9 @@ def load_expression_presets(path: Path) -> list[dict]:
         preset_id = str(entry["id"])
         label = str(entry["label"])
         norm = [float(value) for value in entry["norm"]]
-        if len(norm) != 32:
+        if len(norm) != 33:
             raise RuntimeError(
-                f"Expression preset '{preset_id}' must contain exactly 32 norm values, got {len(norm)}"
+                f"Expression preset '{preset_id}' must contain exactly 33 norm values, got {len(norm)}"
             )
         clamped = [clamp(value, -1.0, 1.0) for value in norm]
         if clamped != norm:
@@ -141,9 +141,9 @@ def build_idle_behavior(module) -> dict:
 
 def main() -> None:
     module = load_module(CONFIG_PATH)
-    if len(module.MOTOR_MAP) != 32:
-        raise RuntimeError(f"Expected 32 motors, got {len(module.MOTOR_MAP)}")
-    channels = [build_channel(module, motor_id) for motor_id in range(32)]
+    if len(module.MOTOR_MAP) != 33:
+        raise RuntimeError(f"Expected 33 motors, got {len(module.MOTOR_MAP)}")
+    channels = [build_channel(module, motor_id) for motor_id in range(33)]
 
     payload = {
         "transport": {

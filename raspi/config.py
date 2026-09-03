@@ -66,6 +66,7 @@ MOTOR_NAMES = {
     29: "tongue_lower",
     30: "neck_left",
     31: "neck_right",
+    32: "jaw_left_upper",
 }
 
 # Channels listed here stay in the 32-channel protocol but are held at their
@@ -110,6 +111,7 @@ MOTOR_MAP = {
     # neck_rigid
     30: (0, 14),  # neck_KS3518: 1 'neck_left'
     31: (0, 15),  # neck_KS3518: 2 'neck_right'
+    32: (1, 14),  # jaw_left_upper, added 2026-09-03
 }
 
 MOTOR_LIMITS = {
@@ -153,6 +155,9 @@ MOTOR_LIMITS = {
     # range-of-motion pass is done.
     30: (75, 105),
     31: (75, 105),
+    # Fresh servo, travel unmeasured -- deliberately tight window around the
+    # assumed center; widen from jog measurements (ledger).
+    32: (80, 100),
 }
 
 MOTOR_OFFSET = {
@@ -201,6 +206,7 @@ MOTOR_INITIAL_APPLIED = {
     29: 79.0,
     30: 90.0,
     31: 95.5,  # measured level head 2026-08-29 (ledger)
+    32: 90.0,
 }
 
 # Jaw linkage compensation.

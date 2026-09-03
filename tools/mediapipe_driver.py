@@ -289,11 +289,15 @@ def neck_coefficients(
     draws the pair as dev(30) - dev(31), so the preview and the twin face agree
     with each other whether or not they agree with the hardware.
     """
-    common = clamp_signed(pitch_deg / pitch_range_deg) * NECK_MODE_BUDGET
-    differential = clamp_signed(roll_deg / roll_range_deg) * NECK_MODE_BUDGET
+    # Hardware-settled 2026-09-03 (see the renderers' MIRRORED_CHANNELS note):
+    # ch31 is mirror-mounted, so a physical NOD is differential in command
+    # space (30 up, 31 down) and a physical TILT is common. Pitch therefore
+    # enters ch31 with a minus sign, roll with a plus.
+    pitch = clamp_signed(pitch_deg / pitch_range_deg) * NECK_MODE_BUDGET
+    roll = clamp_signed(roll_deg / roll_range_deg) * NECK_MODE_BUDGET
     return (
-        clamp01(NECK_REST[0] + common + differential),
-        clamp01(NECK_REST[1] + common - differential),
+        clamp01(NECK_REST[0] + pitch + roll),
+        clamp01(NECK_REST[1] - pitch + roll),
     )
 
 

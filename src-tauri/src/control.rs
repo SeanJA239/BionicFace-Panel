@@ -48,10 +48,12 @@ const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
 // unequal degrees and mix a sideways tilt into the head-back motion -- the
 // renderer needed the same fix for pitch.
 //
-// Direction assumptions, both unverified on hardware (see
-// docs/hardware/CHANNEL_VERIFICATION.md):
-// * head-back = +degrees on both neck motors; negate LAUGH_NECK_LIFT_DEG if
-//   the real head dips forward instead.
+// Direction notes (see docs/hardware/CHANNEL_VERIFICATION.md):
+// * Hardware-settled 2026-09-03: neck_right (31) is mirror-mounted, so a
+//   physical nod is DIFFERENTIAL in command space -- 30 up, 31 down. The nod
+//   action's differential oscillation was observed nodding on the machine.
+//   Whether +30/-31 means head-back or head-forward is still unverified;
+//   negate LAUGH_NECK_LIFT_DEG if the laugh dips instead of lifting.
 // * jaw_right_upper (25) opens toward max -- the only evidence is that the
 //   惊讶/张嘴说话 presets command it positive. jaw_left_upper (32) is assumed
 //   mirror-mounted and opens toward min; its neutral (96.5) also leaves just
@@ -1403,7 +1405,7 @@ fn laugh_phase_targets(channels: &[MotorChannel], open: bool) -> [(usize, f32); 
     };
     [
         target(NECK_UP_MOTOR, LAUGH_NECK_LIFT_DEG),
-        target(NECK_MIRROR_MOTOR, LAUGH_NECK_LIFT_DEG),
+        target(NECK_MIRROR_MOTOR, -LAUGH_NECK_LIFT_DEG),
         target(JAW_RIGHT_UPPER_MOTOR, LAUGH_JAW_OPEN_DEG),
         target(JAW_LEFT_UPPER_MOTOR, -LAUGH_JAW_OPEN_DEG),
     ]
@@ -2980,7 +2982,7 @@ mod tests {
         channels[32] = ch_with_id(32, 80.0, 100.0, 96.5);
 
         let open = laugh_phase_targets(&channels, true);
-        let expected = [(30, 101.5), (31, 103.5), (25, 109.5), (32, 89.5)];
+        let expected = [(30, 101.5), (31, 87.5), (25, 109.5), (32, 89.5)];
         for ((motor_id, norm), (expected_id, expected_deg)) in open.iter().zip(expected) {
             assert_eq!(*motor_id, expected_id);
             approx(channels[*motor_id].norm_to_applied(*norm), expected_deg);

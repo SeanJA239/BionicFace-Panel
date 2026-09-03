@@ -51,14 +51,18 @@ const FACE_CENTER: readonly [number, number] = [450, 380];
 // renders that preset with the two halves of the lower lip moving apart.
 // Every other pair here is unanimous.
 //
+// Channel 31 (neck_right) joined on direct hardware evidence (2026-09-03): the
+// nod action drives the pair DIFFERENTIALLY in command space, and on the real
+// machine that produces a nod -- both sides physically moving the same way --
+// so ch31's command direction is inverted, i.e. mirror-mounted like the rest
+// of the right side. With its dev negated here, the existing formulas are
+// correct unchanged: tilt = dev(30) - dev(31), pitch = (dev(30) + dev(31)) / 2.
+//
 // Deliberately excluded, for structural reasons rather than lack of evidence:
 // midline channels with no mirror partner (8, 13, 15, 23, 24); the jaw, whose
-// open axis enters through Math.abs and whose 26/27 pair is coupled in Rust;
-// and the neck, which enters as the difference dev(30) - dev(31), a form that
-// already handles a mirrored pair (tilt is antisymmetric either way, so the
-// presets cannot tell us about neck mounting).
+// open axis enters through Math.abs and whose 26/27 pair is coupled in Rust.
 const MIRRORED_CHANNELS: ReadonlySet<number> = new Set([
-  0, 1, 6, 7, 11, 12, 16, 17, 18,
+  0, 1, 6, 7, 11, 12, 16, 17, 18, 31,
 ]);
 
 /** Canonical subject-right <-> subject-left pairing of the paired facial

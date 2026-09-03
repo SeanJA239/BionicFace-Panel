@@ -196,22 +196,22 @@ MOTOR_INITIAL_APPLIED = {
     14: 90.0,
     15: 105.0,
     16: 88.0,
-    17: 40.0,
-    18: 110.0,
-    19: 115.0,
+    17: 46.0,  # measured neutral pose 2026-09-03
+    18: 115.5,  # measured neutral pose 2026-09-03
+    19: 130.0,  # measured neutral pose 2026-09-03
     20: 110.0,
     21: 85.0,
     22: 90.0,
     23: 85.0,
     24: 89.5,
-    25: 93.5,
+    25: 102.5,  # measured neutral pose 2026-09-03
     26: 135.0,
     27: 75.0,
     28: 79.5,
     29: 79.0,
-    30: 90.0,
+    30: 93.5,  # measured neutral pose 2026-09-03
     31: 95.5,  # measured level head 2026-08-29 (ledger)
-    32: 90.0,
+    32: 96.5,  # measured neutral pose 2026-09-03
 }
 
 # Jaw linkage compensation.

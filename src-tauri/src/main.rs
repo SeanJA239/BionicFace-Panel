@@ -127,6 +127,11 @@ async fn wink(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
 }
 
 #[tauri::command]
+async fn laugh(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
+    state.laugh().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn get_runtime_state(state: State<'_, Arc<AppState>>) -> Result<RuntimeState, String> {
     Ok(state.runtime_state().await)
 }
@@ -236,6 +241,7 @@ pub fn run() {
             apply_expression_preset,
             apply_expression_preset_scaled,
             nod,
+            laugh,
             wink,
             list_sequences,
             get_sequence_playback_status,

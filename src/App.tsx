@@ -15,6 +15,7 @@ import {
   listExpressionPresets,
   listSequences,
   nod,
+  laugh,
   playSequence,
   setIdleBehaviorEnabled,
   setMotorTarget,
@@ -275,6 +276,17 @@ function App() {
     }
   }
 
+  async function handleLaugh() {
+    try {
+      setStatus("Laughing...");
+      const next = await laugh();
+      setRuntime(next);
+      setStatus("Laugh complete");
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
   async function handleWink() {
     try {
       setStatus("Winking...");
@@ -391,6 +403,9 @@ function App() {
             </button>
             <button className="secondary" onClick={handleNod} disabled={isExternal}>
               Nod
+            </button>
+            <button className="secondary" onClick={handleLaugh} disabled={isExternal}>
+              Laugh
             </button>
             <button className="secondary" onClick={handleFlush}>
               Flush

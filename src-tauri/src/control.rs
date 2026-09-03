@@ -41,6 +41,30 @@ const NOD_AMPLITUDE_NORM: f32 = 1.0;
 const NOD_CYCLES: usize = 2;
 const NOD_PHASE_DWELL: Duration = Duration::from_millis(300);
 
+// Laugh action: throw the head back while both jaw-upper motors swing open,
+// dwell, return to base, three times. Amplitudes are in DEGREES, not norm:
+// the neck pair's neutrals sit asymmetrically in their ranges (motor 30 at
+// 93.5, motor 31 at 95.5, both capped at 105), so equal norm would move
+// unequal degrees and mix a sideways tilt into the head-back motion -- the
+// renderer needed the same fix for pitch.
+//
+// Direction assumptions, both unverified on hardware (see
+// docs/hardware/CHANNEL_VERIFICATION.md):
+// * head-back = +degrees on both neck motors; negate LAUGH_NECK_LIFT_DEG if
+//   the real head dips forward instead.
+// * jaw_right_upper (25) opens toward max -- the only evidence is that the
+//   惊讶/张嘴说话 presets command it positive. jaw_left_upper (32) is assumed
+//   mirror-mounted and opens toward min; its neutral (96.5) also leaves just
+//   3.5 deg upward, so downward is almost certainly the open direction. Flip
+//   the sign on the affected motor in laugh_phase_targets if jogging says
+//   otherwise.
+const LAUGH_CYCLES: usize = 3;
+const LAUGH_PHASE_DWELL: Duration = Duration::from_millis(400);
+const LAUGH_NECK_LIFT_DEG: f32 = 8.0;
+const LAUGH_JAW_OPEN_DEG: f32 = 7.0;
+const JAW_RIGHT_UPPER_MOTOR: usize = 25;
+const JAW_LEFT_UPPER_MOTOR: usize = 32;
+
 // Wink holds the wink pose briefly, then returns to the center-all neutral.
 const WINK_HOLD: Duration = Duration::from_millis(500);
 const WINK_PRESET_ID: &str = "wink";
@@ -908,6 +932,35 @@ impl ControlService {
         Ok(self.runtime_state().await)
     }
 
+    async fn set_laugh_targets(&self, open: bool) {
+        let mut state = self.state.lock().await;
+        let targets = laugh_phase_targets(&state.channels, open);
+        for (motor_id, norm) in targets {
+            apply_motor_target_norm(&mut state, motor_id, norm);
+        }
+    }
+
+    /// Laugh: throw the head back while both jaw-upper motors open, dwell,
+    /// come back to base, LAUGH_CYCLES times. Same shape as `nod`: targets are
+    /// set over time and the heartbeat interpolates + dispatches them, and the
+    /// same manual-writability guard applies.
+    pub async fn laugh(&self) -> Result<RuntimeState> {
+        {
+            let mut state = self.state.lock().await;
+            ensure_manual_writable(&state)?;
+            cancel_automated_motion(&mut state);
+        }
+
+        for _ in 0..LAUGH_CYCLES {
+            self.set_laugh_targets(true).await;
+            tokio::time::sleep(LAUGH_PHASE_DWELL).await;
+            self.set_laugh_targets(false).await;
+            tokio::time::sleep(LAUGH_PHASE_DWELL).await;
+        }
+
+        Ok(self.runtime_state().await)
+    }
+
     pub async fn list_sequences(&self) -> Vec<SequenceSummary> {
         let state = self.state.lock().await;
         state
@@ -1123,6 +1176,10 @@ impl AppState {
         self.service.wink().await
     }
 
+    pub async fn laugh(&self) -> Result<RuntimeState> {
+        self.service.laugh().await
+    }
+
     pub async fn list_sequences(&self) -> Vec<SequenceSummary> {
         self.service.list_sequences().await
     }
@@ -1329,6 +1386,29 @@ fn normalize_expression_presets(
 /// frontend also greys out its controls, but this backend guard is the real
 /// enforcement per the architecture's "no process bypasses ControlService"
 /// rule extended to arbitration between command sources.
+/// One laugh phase's (motor_id, norm) targets. `open` selects the
+/// head-back-and-jaws-open pose; false returns every involved motor to its
+/// neutral. Offsets are specified in degrees around each motor's neutral and
+/// converted through that channel's own bipolar norm, so both neck motors move
+/// the same physical amount despite their asymmetric neutrals.
+fn laugh_phase_targets(channels: &[MotorChannel], open: bool) -> [(usize, f32); 4] {
+    let target = |motor_id: usize, delta_deg: f32| {
+        let channel = &channels[motor_id];
+        let norm = if open {
+            channel.applied_to_norm(channel.neutral_applied + delta_deg)
+        } else {
+            0.0
+        };
+        (motor_id, norm)
+    };
+    [
+        target(NECK_UP_MOTOR, LAUGH_NECK_LIFT_DEG),
+        target(NECK_MIRROR_MOTOR, LAUGH_NECK_LIFT_DEG),
+        target(JAW_RIGHT_UPPER_MOTOR, LAUGH_JAW_OPEN_DEG),
+        target(JAW_LEFT_UPPER_MOTOR, -LAUGH_JAW_OPEN_DEG),
+    ]
+}
+
 fn ensure_manual_writable(state: &InnerState) -> Result<()> {
     if state.control_source == ControlSource::External {
         bail!("control source is External; call force_manual_control to regain manual control");
@@ -2884,6 +2964,33 @@ mod tests {
             assert!(
                 (norm - base_norm).abs() <= state.idle_behavior.noise_amplitude + 1e-3,
                 "noise should stay within the configured amplitude of the base pose, got norm={norm}"
+            );
+        }
+    }
+
+    #[test]
+    fn laugh_phase_targets_move_by_degrees_and_return_to_base() {
+        // Real calibrated geometry for the four involved motors; the neck
+        // pair's asymmetric neutrals are the point -- equal degrees must come
+        // out, not equal norm.
+        let mut channels = plain_state().channels;
+        channels[25] = ch_with_id(25, 75.0, 110.0, 102.5);
+        channels[30] = ch_with_id(30, 75.0, 105.0, 93.5);
+        channels[31] = ch_with_id(31, 75.0, 105.0, 95.5);
+        channels[32] = ch_with_id(32, 80.0, 100.0, 96.5);
+
+        let open = laugh_phase_targets(&channels, true);
+        let expected = [(30, 101.5), (31, 103.5), (25, 109.5), (32, 89.5)];
+        for ((motor_id, norm), (expected_id, expected_deg)) in open.iter().zip(expected) {
+            assert_eq!(*motor_id, expected_id);
+            approx(channels[*motor_id].norm_to_applied(*norm), expected_deg);
+        }
+
+        let base = laugh_phase_targets(&channels, false);
+        for (motor_id, norm) in base {
+            approx(
+                channels[motor_id].norm_to_applied(norm),
+                channels[motor_id].neutral_applied,
             );
         }
     }

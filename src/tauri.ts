@@ -139,6 +139,10 @@ export async function nod(): Promise<RuntimeState> {
   return safeInvoke("nod");
 }
 
+export async function laugh(): Promise<RuntimeState> {
+  return safeInvoke("laugh");
+}
+
 export async function listSequences(): Promise<SequenceSummary[]> {
   return safeInvoke("list_sequences");
 }

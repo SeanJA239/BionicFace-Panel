@@ -91,6 +91,42 @@ _NECK: list[tuple[Point, Point]] = [
 ]
 
 
+def _smooth(points: list[Point], samples: int = 8) -> list[Point]:
+    """Catmull-Rom through every control point, endpoints duplicated -- the
+    same scheme the main renderers use, duplicated here so the twin modules
+    stay self-contained (importing it back from the renderer would be a
+    cycle). Teeth quads and separators stay angular on purpose: they are
+    teeth."""
+    if len(points) < 3:
+        return list(points)
+    pts = [points[0], *points, points[-1]]
+    out: list[Point] = [points[0]]
+    for i in range(len(pts) - 3):
+        p0, p1, p2, p3 = pts[i], pts[i + 1], pts[i + 2], pts[i + 3]
+        for step in range(1, samples + 1):
+            s = step / samples
+            s2, s3 = s * s, s * s * s
+            out.append(
+                (
+                    0.5
+                    * (
+                        2 * p1[0]
+                        + (-p0[0] + p2[0]) * s
+                        + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * s2
+                        + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * s3
+                    ),
+                    0.5
+                    * (
+                        2 * p1[1]
+                        + (-p0[1] + p2[1]) * s
+                        + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * s2
+                        + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * s3
+                    ),
+                )
+            )
+    return out
+
+
 def _rotate(point: Point, angle_rad: float) -> Point:
     c, s = math.cos(angle_rad), math.sin(angle_rad)
     return (point[0] * c - point[1] * s, point[0] * s + point[1] * c)
@@ -136,9 +172,9 @@ def profile_geometry(
         return [(place((x, top_y)), place((x, bottom_y))) for x in _TOOTH_SEPARATORS_X]
 
     return {
-        "skull": [place_head(p) for p in _SKULL],
+        "skull": _smooth([place_head(p) for p in _SKULL]),
         "upper_teeth": [place_head(p) for p in _UPPER_TEETH],
-        "jaw": [place_jaw(p) for p in _JAW],
+        "jaw": _smooth([place_jaw(p) for p in _JAW]),
         "lower_teeth": [place_jaw(p) for p in _LOWER_TEETH],
         "tooth_separators": separators(_UPPER_TEETH, place_head)
         + separators(_LOWER_TEETH, place_jaw),

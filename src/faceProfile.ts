@@ -88,6 +88,37 @@ const NECK: Array<readonly [ProfilePoint, ProfilePoint]> = [
   ],
 ];
 
+/** Catmull-Rom through every control point, endpoints duplicated -- the same
+ * scheme the main renderers use, duplicated here so the twin modules stay
+ * self-contained (importing it back from the renderer would be a cycle).
+ * Teeth quads and separators stay angular on purpose: they are teeth. */
+function smooth(points: ProfilePoint[], samples = 8): ProfilePoint[] {
+  if (points.length < 3) return [...points];
+  const pts = [points[0], ...points, points[points.length - 1]];
+  const out: ProfilePoint[] = [points[0]];
+  for (let i = 0; i < pts.length - 3; i++) {
+    const [p0, p1, p2, p3] = [pts[i], pts[i + 1], pts[i + 2], pts[i + 3]];
+    for (let step = 1; step <= samples; step++) {
+      const s = step / samples;
+      const s2 = s * s;
+      const s3 = s2 * s;
+      out.push([
+        0.5 *
+          (2 * p1[0] +
+            (-p0[0] + p2[0]) * s +
+            (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * s2 +
+            (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * s3),
+        0.5 *
+          (2 * p1[1] +
+            (-p0[1] + p2[1]) * s +
+            (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * s2 +
+            (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * s3),
+      ]);
+    }
+  }
+  return out;
+}
+
 function rotate(point: ProfilePoint, angleRad: number): ProfilePoint {
   const c = Math.cos(angleRad);
   const s = Math.sin(angleRad);
@@ -133,9 +164,9 @@ export function profileGeometry(
     TOOTH_SEPARATORS_X.map((x) => [place([x, quad[0][1]]), place([x, quad[2][1]])] as const);
 
   return {
-    skull: SKULL.map(placeHead),
+    skull: smooth(SKULL.map(placeHead)),
     upperTeeth: UPPER_TEETH.map(placeHead),
-    jaw: JAW.map(placeJaw),
+    jaw: smooth(JAW.map(placeJaw)),
     lowerTeeth: LOWER_TEETH.map(placeJaw),
     toothSeparators: [...separators(UPPER_TEETH, placeHead), ...separators(LOWER_TEETH, placeJaw)],
     neck: NECK.map(([a, b]) => [placeNeck(a), placeNeck(b)] as const),
